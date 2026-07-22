@@ -169,7 +169,7 @@ button.warn{color:var(--rd);}
   display:none; overflow:auto;
 }
 #viewer.on{display:block;}
-#viewer canvas{display:block; margin:auto; box-shadow:0 4px 30px rgba(0,0,0,.6); cursor:grab;}
+#viewer canvas{display:block; box-shadow:0 4px 30px rgba(0,0,0,.6); cursor:grab;}
 #vclose{position:fixed; top:14px; right:18px; z-index:201; font-size:14px; padding:8px 14px;}
 #vopen{position:fixed; top:14px; right:158px; z-index:201; font-size:14px; padding:8px 14px;}
 #vhint{
@@ -235,9 +235,9 @@ button.warn{color:var(--rd);}
 #edWidthDot{display:inline-block; border-radius:50%; background:var(--text2); flex:none;}
 #modebar input[type=range]{width:92px; accent-color:var(--bl); cursor:pointer;}
 #edstage{
-  width:100%; height:100%; overflow:auto; padding:16px;
+  width:100%; height:100%; overflow:hidden; position:relative;
 }
-#edwrap{position:relative; margin:0 auto; width:max-content; box-shadow:0 4px 24px rgba(0,0,0,.4); background:#fff; line-height:0;}
+#edwrap{position:absolute; top:0; left:0; transform-origin:0 0; width:max-content; box-shadow:0 4px 24px rgba(0,0,0,.4); background:#fff; line-height:0;}
 #edcanvas{display:block; touch-action:none; cursor:crosshair;}
 </style>
 </head>
@@ -270,6 +270,7 @@ button.warn{color:var(--rd);}
       <button class="etool" data-tool="line" title="直線">／直線</button>
       <button class="etool" data-tool="arrow" title="矢印">↗矢印</button>
       <button class="etool" data-tool="rect" title="囲み枠">▢囲み</button>
+      <button class="etool" data-tool="hlrect" title="囲みマーカー（半透明で塗る）">▨囲みマーカー</button>
       <button class="etool" data-tool="text" title="文字を入れる">Ａ文字</button>
       <button class="etool" data-tool="stamp" title="ハンコを押す">🔴ハンコ</button>
       <button class="etool" data-tool="move" title="書き込みをつかんで移動">☝移動</button>
@@ -831,7 +832,7 @@ let edBackup=null;     // キャンセル用に編集前annotsを退避
 let edTool='pen', edColor='#e5352b', edWidthVal=2, edStamp='承認';   // 太さはスライダー値(1〜10)
 let edDrawing=false;   // ドラッグ中か
 let edCur=null;        // ドラッグ中の仮注釈（確定で p.annots へ push）
-let edZoom=1;          // 書き込み画面の表示倍率（ホイールで変更・描画座標は正規化なので無影響）
+let edZoom=1, edPanX=0, edPanY=0;   // 書き込み画面の倍率と表示位置（#edwrapのtransformで反映）
 let edAlpha=1;         // 書き込みの濃さ（濃1／中0.6／淡0.3）
 let edMoving=null;     // 移動ツールでつかんでいる書き込み {a, sx, sy, snap}
 let edSnapOn=true;     // 図面への吸着ON/OFF（🧲ボタン）
@@ -876,6 +877,9 @@ function drawAnnots(ctx, annots, W, H){
       ctx.lineWidth=a.w*S;
       const x=Math.min(a.x1,a.x2)*W, y=Math.min(a.y1,a.y2)*H, w=Math.abs(a.x2-a.x1)*W, h=Math.abs(a.y2-a.y1)*H;
       ctx.strokeRect(x,y,w,h);
+    }else if(a.type==='hlrect'){
+      const x=Math.min(a.x1,a.x2)*W, y=Math.min(a.y1,a.y2)*H, w=Math.abs(a.x2-a.x1)*W, h=Math.abs(a.y2-a.y1)*H;
+      ctx.fillRect(x,y,w,h);   // 囲みマーカー＝半透明の塗り（globalAlphaは上でa.alをセット済み）
     }else if(a.type==='text'){
       const fs=a.size*S;
       ctx.font=fs+'px -apple-system,"Hiragino Sans","Yu Gothic UI","Yu Gothic",sans-serif';
@@ -948,10 +952,13 @@ async function openEditor(uid){
   try{ edBg=await renderPageCanvas(p, 2000); }
   catch(e){ console.error(e); toast('ページを開けませんでした'); $('editor').classList.remove('on'); return; }
   const cv=$('edcanvas'); cv.width=edBg.width; cv.height=edBg.height;
+  cv.style.width=''; cv.style.height='';   // 等倍表示（拡大は#edwrapのtransformで行う）
   edCtx=cv.getContext('2d');
   const st=$('edstage');
   edZoom = Math.min((st.clientWidth-40)/cv.width, (st.clientHeight-40)/cv.height, 1);   // まず全体が見える倍率
-  applyEdZoom();
+  edPanX = (st.clientWidth - cv.width*edZoom)/2;    // 画面中央に配置
+  edPanY = (st.clientHeight - cv.height*edZoom)/2;
+  applyEdView();
   redrawEditor();
   buildEdSnap(p);   // 図面への吸着データを裏で用意（できあがり次第、効き始める）
   const t=$('toast'); t.classList.remove('on'); clearTimeout(toast._t);   // 準備中トーストを消す
@@ -977,10 +984,8 @@ async function closeEditor(save){
 }
 
 // 書き込み画面のズーム表示を反映（canvasの見た目サイズだけ変える。座標は正規化なのでズレない）
-function applyEdZoom(){
-  const cv=$('edcanvas');
-  cv.style.width = Math.round(cv.width*edZoom)+'px';
-  cv.style.height = Math.round(cv.height*edZoom)+'px';
+function applyEdView(){
+  $('edwrap').style.transform = 'translate('+edPanX+'px,'+edPanY+'px) scale('+edZoom+')';
 }
 // ==== 図面への吸着（モジュールグリッドの方式を移植） ========================
 // PDFの描画命令から線分・端点・交点を、文字情報から文字中心を取り出し、正規化座標で持つ。
@@ -1106,8 +1111,8 @@ function edDown(e){
   if(!edCtx) return;
   const [x,y]=edPos(e), w=widthOf();
   if(edTool==='pen'){ edDrawing=true; edCur={type:'pen', color:edColor, w, al:edAlpha, pts:[[x,y]]}; }
-  else if(edTool==='marker' || edTool==='line' || edTool==='arrow' || edTool==='rect'){
-    const al = (edTool==='marker') ? 0.35*edAlpha : edAlpha;   // マーカーは元々半透明×濃さ
+  else if(edTool==='marker' || edTool==='line' || edTool==='arrow' || edTool==='rect' || edTool==='hlrect'){
+    const al = (edTool==='marker') ? 0.35*edAlpha : (edTool==='hlrect') ? 0.3*edAlpha : edAlpha;   // マーカー/囲みマーカーは半透明×濃さ
     const s0 = edSnapPoint(x, y);                              // 1点目から図面に吸着
     edDrawing=true; edCur={type:edTool, color:edColor, w, al, x1:s0.x, y1:s0.y, x2:s0.x, y2:s0.y};
   }
@@ -1138,7 +1143,7 @@ function edMove(e){
   }
   if(!edDrawing || !edCur){
     // 描いていない間も、線系ツールなら吸着先を水色マークでプレビュー
-    if(edSnapOn && edSnapCache && (edTool==='line'||edTool==='arrow'||edTool==='marker'||edTool==='rect')){
+    if(edSnapOn && edSnapCache && (edTool==='line'||edTool==='arrow'||edTool==='marker'||edTool==='rect'||edTool==='hlrect')){
       const [hx,hy]=edPos(e); const s=edSnapPoint(hx,hy);
       const nh = s.hit ? {x:s.x, y:s.y} : null;
       if(!!nh !== !!edSnapHit || (nh && edSnapHit && (nh.x!==edSnapHit.x || nh.y!==edSnapHit.y))){ edSnapHit=nh; redrawSoon(); }
@@ -1151,7 +1156,7 @@ function edMove(e){
     const s = edSnapPoint(x, y);                 // 2点目も図面の線・交点・文字へ吸着
     edSnapHit = s.hit ? {x:s.x, y:s.y} : null;
     edCur.x2=s.x; edCur.y2=s.y;
-    if(!s.hit && edCur.type!=='rect') edAxisLock(edCur);   // 吸着していない時だけ水平垂直補正
+    if(!s.hit && edCur.type!=='rect' && edCur.type!=='hlrect') edAxisLock(edCur);   // 吸着していない時だけ水平垂直補正
   }
   redrawEditor(); e.preventDefault();
 }
@@ -1161,7 +1166,7 @@ function edUp(){
   edDrawing=false;
   const p=pages.find(u=>u.uid===edUid);
   let ok=true;    // 直線・矢印・枠は極小(誤クリック)を捨てる
-  if(edCur.type==='line'||edCur.type==='arrow'||edCur.type==='rect'||edCur.type==='marker'){ if(Math.hypot(edCur.x2-edCur.x1, edCur.y2-edCur.y1)<0.006) ok=false; }
+  if(edCur.type==='line'||edCur.type==='arrow'||edCur.type==='rect'||edCur.type==='marker'||edCur.type==='hlrect'){ if(Math.hypot(edCur.x2-edCur.x1, edCur.y2-edCur.y1)<0.006) ok=false; }
   if(ok && p) p.annots.push(edCur);
   edCur=null; redrawEditor();
 }
@@ -1176,6 +1181,7 @@ function hitAnnot(a,x,y,thr){
   if((a.type==='pen'||a.type==='marker') && a.pts){ const t=a.type==='marker'?thr*2.2:thr; for(let i=0;i<a.pts.length;i++){ if(i>0 && distToSeg(x,y,a.pts[i-1],a.pts[i])<t) return true; if(Math.hypot(a.pts[i][0]-x,a.pts[i][1]-y)<t) return true; } return false; }
   if(a.type==='line'||a.type==='arrow'||a.type==='marker') return distToSeg(x,y,[a.x1,a.y1],[a.x2,a.y2]) < (a.type==='marker'?thr*2.2:thr);
   if(a.type==='rect'){ const x1=Math.min(a.x1,a.x2),x2=Math.max(a.x1,a.x2),y1=Math.min(a.y1,a.y2),y2=Math.max(a.y1,a.y2); const inX=x>x1-thr&&x<x2+thr, inY=y>y1-thr&&y<y2+thr; return ((Math.abs(x-x1)<thr||Math.abs(x-x2)<thr)&&inY)||((Math.abs(y-y1)<thr||Math.abs(y-y2)<thr)&&inX); }
+  if(a.type==='hlrect'){ const x1=Math.min(a.x1,a.x2),x2=Math.max(a.x1,a.x2),y1=Math.min(a.y1,a.y2),y2=Math.max(a.y1,a.y2); return x>x1-thr&&x<x2+thr&&y>y1-thr&&y<y2+thr; }
   if(a.type==='text') return x>a.x-thr && x<a.x+0.14 && y>a.y-thr && y<a.y+0.06;
   if(a.type==='stamp') return Math.abs(x-a.x)<0.09 && Math.abs(y-a.y)<0.05;
   if(a.type==='note') return x>a.x-thr && x<a.x+0.28 && y>a.y-thr && y<a.y+0.14;
@@ -1760,6 +1766,7 @@ async function openViewer(p){
     vBaseW=cv.width; vBaseH=cv.height;
     vScale = Math.min((window.innerWidth-40)/cv.width, (window.innerHeight-40)/cv.height, 1);
     applyVScale();
+    fitViewer(true);
   }catch(e){ console.error(e); toast('拡大表示に失敗しました'); $('viewer').classList.remove('on'); return; }
   const t=$('toast'); t.classList.remove('on'); clearTimeout(toast._t);
 }
@@ -1767,6 +1774,11 @@ function applyVScale(){
   const dst=$('vcanvas');
   dst.style.width=Math.round(vBaseW*vScale)+'px';
   dst.style.height=Math.round(vBaseH*vScale)+'px';
+}
+function fitViewer(center){
+  const v=$('viewer');
+  v.style.padding = Math.round(v.clientHeight*0.5)+'px '+Math.round(v.clientWidth*0.5)+'px';
+  if(center){ v.scrollLeft=(v.scrollWidth-v.clientWidth)/2; v.scrollTop=(v.scrollHeight-v.clientHeight)/2; }
 }
 function closeViewer(){ $('viewer').classList.remove('on'); }
 // このページ1枚だけをPDF化して「別ウィンドウ」で開く（書き込み中の参照用にも使う）。
@@ -1838,9 +1850,14 @@ $('viewer').addEventListener('click',(e)=>{ if(e.target===$('viewer')) closeView
 window.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && $('viewer').classList.contains('on')) closeViewer(); });
 $('viewer').addEventListener('wheel',(e)=>{
   e.preventDefault();
-  const f = e.deltaY<0 ? 1.15 : 1/1.15;
-  vScale = Math.max(0.2, Math.min(6, vScale*f));
+  const v=$('viewer'), r=v.getBoundingClientRect();
+  const cx=e.clientX-r.left, cy=e.clientY-r.top, old=vScale;
+  vScale = Math.max(0.2, Math.min(6, vScale*(e.deltaY<0?1.15:1/1.15)));
+  if(vScale===old) return;
+  const f=vScale/old;
   applyVScale();
+  v.scrollLeft=(v.scrollLeft+cx)*f-cx;   // カーソル位置を基準に拡大縮小
+  v.scrollTop=(v.scrollTop+cy)*f-cy;
 },{passive:false});
 (function(){   // つかんでスクロール（図面の見たい場所へ移動）
   const v=$('viewer'); let drag=null;
@@ -1860,6 +1877,12 @@ $('edAlphaRng').oninput = ()=>{ edAlpha=$('edAlphaRng').value/100; $('edAlphaLbl
 document.querySelectorAll('.estamp').forEach(b=> b.onclick=()=>{ edStamp=b.dataset.stamp; document.querySelectorAll('.estamp').forEach(x=>x.classList.toggle('active',x===b)); edSelectTool('stamp'); });
 $('edUndo').onclick = edUndoFn;
 $('edSnapBtn').onclick = ()=>{ edSnapOn=!edSnapOn; $('edSnapBtn').classList.toggle('active', edSnapOn); if(!edSnapOn){ edSnapHit=null; redrawEditor(); } };
+// Ctrl+Z（Mac は Cmd+Z）＝書き込み中は1つ戻す
+window.addEventListener('keydown', (e)=>{
+  if((e.ctrlKey||e.metaKey) && !e.shiftKey && (e.key==='z'||e.key==='Z') && $('editor').classList.contains('on') && !e.target.closest('input,textarea')){
+    e.preventDefault(); edUndoFn();
+  }
+});
 (function(){
   const cv = $('edcanvas'), st = $('edstage');
   // スペース押下（書き込み中のみ）＝つかんで移動モードへ
@@ -1869,7 +1892,7 @@ $('edSnapBtn').onclick = ()=>{ edSnapOn=!edSnapOn; $('edSnapBtn').classList.togg
   cv.addEventListener('pointerdown', (e)=>{
     if(e.button===2) return;              // 右クリックは「戻す」に使う（描画を始めない）
     if(e.button===1 || edSpace){          // 中ボタン or スペース＋ドラッグ＝つかんで移動
-      edPanning={x:e.clientX, y:e.clientY, sl:st.scrollLeft, stp:st.scrollTop};
+      edPanning={x:e.clientX, y:e.clientY, px:edPanX, py:edPanY};
       cv.style.cursor='grabbing';
       try{ cv.setPointerCapture(e.pointerId); }catch(_){}
       e.preventDefault(); return;
@@ -1877,7 +1900,7 @@ $('edSnapBtn').onclick = ()=>{ edSnapOn=!edSnapOn; $('edSnapBtn').classList.togg
     edDown(e);
   });
   cv.addEventListener('pointermove', (e)=>{
-    if(edPanning){ st.scrollLeft=edPanning.sl-(e.clientX-edPanning.x); st.scrollTop=edPanning.stp-(e.clientY-edPanning.y); return; }
+    if(edPanning){ edPanX=edPanning.px+(e.clientX-edPanning.x); edPanY=edPanning.py+(e.clientY-edPanning.y); applyEdView(); return; }
     edMove(e);
   });
   const up=(e)=>{ if(edPanning){ edPanning=null; cv.style.cursor=edSpace?'grab':((edTool==='move')?'move':'crosshair'); return; } edUp(e); };
@@ -1888,12 +1911,12 @@ $('edSnapBtn').onclick = ()=>{ edSnapOn=!edSnapOn; $('edSnapBtn').classList.togg
     e.preventDefault();
     const r=st.getBoundingClientRect(), cx=e.clientX-r.left, cy=e.clientY-r.top;
     const old=edZoom;
-    edZoom=Math.max(0.1, Math.min(4, edZoom*(e.deltaY<0?1.15:1/1.15)));
+    edZoom=Math.max(0.1, Math.min(6, edZoom*(e.deltaY<0?1.15:1/1.15)));
     if(edZoom===old) return;
-    const f=edZoom/old;
-    applyEdZoom();
-    st.scrollLeft=(st.scrollLeft+cx)*f-cx;   // 拡大の中心がカーソルからズレないよう補正
-    st.scrollTop=(st.scrollTop+cy)*f-cy;
+    // カーソルの真下にあるコンテンツ点を固定したまま拡大縮小（縦横とも自由に動ける）
+    edPanX = cx - (cx-edPanX)*(edZoom/old);
+    edPanY = cy - (cy-edPanY)*(edZoom/old);
+    applyEdView();
   }, {passive:false});
 })();
 
