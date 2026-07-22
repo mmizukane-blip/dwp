@@ -319,8 +319,9 @@ button.warn{color:var(--rd);}
       <h2><span class="num">1</span>取り込み</h2>
       <div class="grp">
         <button id="btnOpen2" class="primary" style="justify-content:center;">📂 ファイルを選ぶ</button>
+        <button id="btnInbox" style="justify-content:center;">📥 受け皿フォルダを設定</button>
       </div>
-      <div class="hint">PDF・画像（PNG / JPEG）に対応。ここへ、または画面へ<b>ドラッグ＆ドロップ</b>でも取り込めます。<b>1ファイル＝1つの書類（束）</b>としてデスクに並びます。</div>
+      <div class="hint">PDF・画像（PNG / JPEG）に対応。ここへ、または画面へ<b>ドラッグ＆ドロップ</b>でも取り込めます。<b>1ファイル＝1つの書類（束）</b>としてデスクに並びます。<br>🖨 <b>印刷から直接入れる</b>：受け皿フォルダを設定し、印刷時にプリンタ「<b>Microsoft Print to PDF</b>」で<b>そのフォルダへ保存</b>すると、数秒でデスクに届きます（取り込み後、受け皿からは自動で消えます）。</div>
     </div>
 
     <div class="card" id="cardDesk">
@@ -756,6 +757,7 @@ function clearAll(){
   if(!confirm('デスクの書類をすべて消去します（アプリ内の保存データも消えます）。よろしいですか？（PDFに保存したファイルには影響しません）')) return;
   docs.clear(); bundles=[]; pages=[]; selected.clear(); deskSel.clear(); currentUid=null; openBid=null;
   clearDb();
+  setTimeout(saveInboxHandle, 300);   // 受け皿フォルダの設定だけは消さずに残す
   view='desk'; applyView(); renderAll();
   $('pvbox').innerHTML='<div class="ph">書類をダブルクリックすると<br>中身を開きます</div>'; $('pvinfo').textContent='';
 }
@@ -835,6 +837,10 @@ let edMoving=null;     // 移動ツールでつかんでいる書き込み {a, s
 let edSnapOn=true;     // 図面への吸着ON/OFF（🧲ボタン）
 let edSnapCache=null;  // 開いているページの吸着データ {rot, segs, pts, tpts}（正規化座標）
 let edSnapHit=null;    // いま吸着している点（水色マーク表示用）
+let inboxHandle=null;  // 受け皿フォルダ（印刷→PDF→自動取り込み）のハンドル
+let inboxTimer=null;   // 受け皿の監視タイマー
+let inboxPend={};      // 前回ポーリング時のファイルサイズ控え（書き込み完了の判定用）
+let inboxBusy=false;
 let edSpace=false, edPanning=null;   // スペース＋ドラッグのつかんで移動
 
 // --- 注釈を ctx に、幅W×高さH の座標系で描く（正規化座標をpxへ展開） ---
@@ -1660,6 +1666,73 @@ function checkReturnHandoff(){
     };
   };
 }
+// ==== 受け皿フォルダ（印刷→Microsoft Print to PDF→自動取り込み） ============
+// 指定フォルダを数秒ごとに見に行き、新しいPDFをデスクへ取り込んで受け皿からは削除する。
+// 書きかけのファイルを掴まないよう「前回と同じサイズ＝書き込み完了」とみなしてから取り込む。
+function inboxSupported(){ return !!window.showDirectoryPicker; }
+async function setInboxDir(){
+  if(!inboxSupported()){ toast('このブラウザでは受け皿フォルダを使えません（Chrome/Edgeで開いてください）', 4000); return; }
+  try{
+    const h = await showDirectoryPicker({ mode:'readwrite' });
+    inboxHandle = h;
+    saveInboxHandle();
+    startInboxWatch();
+    toast('受け皿フォルダを設定しました：'+(h.name||'')+'（印刷の保存先にこのフォルダを選んでください）', 5000);
+  }catch(_){ /* 選択キャンセル */ }
+  updateInboxUI();
+}
+function saveInboxHandle(){
+  if(!db || !inboxHandle) return;
+  try{ db.transaction('meta','readwrite').objectStore('meta').put({ k:'inboxDir', handle:inboxHandle }); }catch(e){ console.error(e); }
+}
+async function loadInboxHandle(){
+  if(!db) return;
+  const metas = await readAllDb('meta');
+  const rec = metas.find(x=>x.k==='inboxDir');
+  if(rec && rec.handle) inboxHandle = rec.handle;
+}
+async function resumeInbox(userGesture){
+  if(!inboxHandle){ updateInboxUI(); return; }
+  try{
+    let st = await inboxHandle.queryPermission({ mode:'readwrite' });
+    if(st==='prompt' && userGesture) st = await inboxHandle.requestPermission({ mode:'readwrite' });
+    if(st==='granted') startInboxWatch();
+  }catch(e){ console.error(e); }
+  updateInboxUI();
+}
+function startInboxWatch(){
+  clearInterval(inboxTimer);
+  inboxPend={};
+  inboxTimer = setInterval(pollInbox, 3000);
+  pollInbox();
+}
+async function pollInbox(){
+  if(inboxBusy || !inboxHandle) return;
+  inboxBusy=true;
+  try{
+    const st = await inboxHandle.queryPermission({ mode:'readwrite' });
+    if(st!=='granted'){ clearInterval(inboxTimer); inboxTimer=null; updateInboxUI(); return; }
+    const cur={};
+    for await (const [name, h] of inboxHandle.entries()){
+      if(h.kind!=='file' || !/\.pdf$/i.test(name)) continue;
+      let f; try{ f = await h.getFile(); }catch(_){ continue; }
+      cur[name]=f.size;
+      if(inboxPend[name]===f.size && f.size>0){   // 2回連続で同じサイズ＝完成品
+        await handleFiles([f]);
+        try{ await inboxHandle.removeEntry(name); }catch(e){ console.error(e); }
+        delete cur[name];
+        toast('印刷から取り込みました：'+name);
+      }
+    }
+    inboxPend=cur;
+  }catch(e){ console.error(e); }
+  finally{ inboxBusy=false; }
+}
+function updateInboxUI(){
+  const b=$('btnInbox'); if(!b) return;
+  if(!inboxHandle){ b.textContent='📥 受け皿フォルダを設定'; return; }
+  b.textContent = inboxTimer ? ('📥 受け皿：監視中（'+(inboxHandle.name||'')+'）') : '📥 受け皿：クリックで監視を再開';
+}
 // PDF.jsの文書は必要になった時に生成（復元直後はbytesだけ持っている）
 async function pdfjsOf(doc){
   if(doc.kind==='pdf' && !doc.pdfjsDoc){
@@ -1714,6 +1787,11 @@ async function openPageInWindow(p){
 // ==== イベント登録 ===========================================================
 $('btnOpen').onclick = ()=>$('file').click();
 $('btnOpen2').onclick = ()=>$('file').click();
+$('btnInbox').onclick = async ()=>{
+  if(!inboxHandle){ await setInboxDir(); return; }
+  if(!inboxTimer){ await resumeInbox(true); return; }          // 停止中→再開（許可の再確認）
+  if(confirm('受け皿フォルダを変更しますか？（いまの監視はこのまま使えます）')) await setInboxDir();
+};
 $('file').onchange = (e)=>{ handleFiles(e.target.files); e.target.value=''; };
 $('empty').addEventListener('click', ()=>$('file').click());   // 中央の空欄クリックでも取り込み
 $('btnExportAll').onclick = ()=>exportPdf(false);
@@ -1856,6 +1934,8 @@ window.addEventListener('DOMContentLoaded', async ()=>{
   renderAll();
   checkReturnHandoff();                                   // モジュールグリッドからの戻りが待っていれば取り込む
   window.addEventListener('focus', checkReturnHandoff);   // タブへ戻ってきた時にも確認
+  await loadInboxHandle();                                // 受け皿フォルダの設定を復元
+  resumeInbox(false);                                     // 許可が生きていれば黙って監視再開（切れていればボタンで再開）
   if(!window.pdfjsLib || !window.PDFLib){
     toast('lib フォルダが見つかりません', 4000);
   }
