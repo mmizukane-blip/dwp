@@ -172,6 +172,14 @@ button.warn{color:var(--rd);}
 #viewer canvas{display:block; box-shadow:0 4px 30px rgba(0,0,0,.6); cursor:grab;}
 #vclose{position:fixed; top:14px; right:18px; z-index:201; font-size:14px; padding:8px 14px;}
 #vopen{position:fixed; top:14px; right:158px; z-index:201; font-size:14px; padding:8px 14px;}
+/* 拡大ビューアのページ送り（画面の左右端に固定・拡大しても位置は動かない） */
+#vPrev,#vNext{position:fixed; top:50%; transform:translateY(-50%); z-index:201; font-size:20px; padding:14px 12px;}
+#vPrev{left:14px;} #vNext{right:14px;}
+#vPrev:disabled,#vNext:disabled{opacity:.28;}
+#vpos{
+  position:fixed; top:14px; left:18px; z-index:201;
+  color:#fff; font-size:13px; background:rgba(0,0,0,.55); padding:8px 14px; border-radius:14px; pointer-events:none;
+}
 #vhint{
   position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:201;
   color:#fff; font-size:12px; background:rgba(0,0,0,.55); padding:6px 12px; border-radius:14px; pointer-events:none;
@@ -189,6 +197,23 @@ button.warn{color:var(--rd);}
 }
 #pvbox canvas, #pvbox img{max-width:100%; box-shadow:0 2px 8px rgba(0,0,0,.25);}
 #pvbox .ph{color:var(--text3); font-size:12px; text-align:center; line-height:1.7;}
+#pvnav{display:flex; gap:6px; flex:none;}
+#pvnav button{flex:1; justify-content:center;}
+#pvzoom{display:flex; gap:6px; flex:none; align-items:center;}
+#pvzoom button{flex:1; justify-content:center;}
+#pvzlabel{font-size:11.5px; color:var(--text3); min-width:40px; text-align:right;}
+/* 拡大中：枠より小さいうちは中央のまま、はみ出したら端まで動かせるようにする。
+   margin:auto が「余白があれば中央／なければ0」を自動でやってくれるので、
+   拡大した瞬間に画像が上へ飛ぶ（＝カーソル基準がズレる）のを防げる。 */
+#pvbox.zoomed{align-items:flex-start; justify-content:flex-start;}
+#pvbox.zoomed canvas{max-width:none; margin:auto;}
+/* ---- 線レイヤー（検出線の重ね表示） ---- */
+.lnwrap{position:relative; display:inline-block; max-width:100%; margin:auto; line-height:0;}
+.lnwrap canvas{display:block;}
+.lnwrap .lnsvg{position:absolute; inset:0; width:100%; height:100%; pointer-events:none;}
+.lnsvg line{stroke:rgba(220,30,30,.55); stroke-width:1.4;}
+body.nolines .lnsvg{display:none;}
+#pvbox.zoomed .lnwrap{max-width:none;}
 #pvinfo{font-size:11.5px; color:var(--text3); line-height:1.6;}
 /* ---- 進捗トースト ---- */
 #toast{
@@ -251,10 +276,11 @@ button.warn{color:var(--rd);}
     <button id="btnExportAll">💾 すべて書き出し</button>
     <button id="btnExportSel">✂ 選択を書き出し</button>
     <button id="btnPrint">🖨 印刷</button>
+    <button id="btnLines" title="検出した線レイヤーの表示ON/OFF（tools\make_lines.py が作る .lines.json を取り込むと使えます）">📏 線:ON</button>
     <div class="sep"></div>
     <button id="btnClear" class="warn">🗑 全消去</button>
   </div>
-  <input type="file" id="file" accept="application/pdf,image/png,image/jpeg" multiple hidden>
+  <input type="file" id="file" accept="application/pdf,image/png,image/jpeg,.json" multiple hidden>
 </header>
 
 <!-- タイトルバー直下：書き込みモードのON/OFFと道具（ON時だけ道具を表示） -->
@@ -357,6 +383,7 @@ button.warn{color:var(--rd);}
           <button id="btnUp">↑ 前へ</button>
           <button id="btnDown">↓ 後へ</button>
         </div>
+        <button id="btnCopy" style="justify-content:center;">📄 選択をコピー</button>
         <button id="btnExtract" style="justify-content:center;">📤 選択を新しい書類へ</button>
         <button id="btnPagesToGrid" style="justify-content:center;">📐 選択をモジュールグリッドへ</button>
         <button id="btnDel" class="warn" style="justify-content:center;">🗑 選択ページを削除</button>
@@ -394,6 +421,16 @@ button.warn{color:var(--rd);}
   <aside id="preview">
     <h2>🔍 プレビュー</h2>
     <div id="pvbox"><div class="ph">ページをクリックすると<br>ここに大きく表示します</div></div>
+    <div id="pvnav">
+      <button id="pvPrev" title="前のページを表示">◀ 前</button>
+      <button id="pvNext" title="次のページを表示">次 ▶</button>
+    </div>
+    <div id="pvzoom">
+      <button id="pvOut" title="縮小">－</button>
+      <button id="pvFit" title="枠に合わせる">⤢</button>
+      <button id="pvIn" title="拡大">＋</button>
+      <span id="pvzlabel">100%</span>
+    </div>
     <div id="pvinfo"></div>
   </aside>
 </div>
@@ -413,6 +450,9 @@ button.warn{color:var(--rd);}
   <button id="vopen">🗗 別ウィンドウで開く</button>
   <button id="vclose">✕ 閉じる（Esc）</button>
   <canvas id="vcanvas"></canvas>
+  <div id="vpos"></div>
+  <button id="vPrev" title="前のページ">◀</button>
+  <button id="vNext" title="次のページ">▶</button>
   <div id="vhint">ホイール＝拡大縮小　/　ドラッグ＝移動　/　背景クリック・Esc＝閉じる</div>
 </div>
 
@@ -493,6 +533,7 @@ async function handleFiles(fileList){
   let added = 0;
   for(const f of files){
     try{
+      if(/\.json$/i.test(f.name)){ await applyLinesJson(await f.text()); continue; }   // 線レイヤーJSON
       const isPdf = /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name);
       const isImg = /^image\/(png|jpeg)/i.test(f.type) || /\.(png|jpe?g)$/i.test(f.name);
       if(isPdf){ added += await addPdf(f); }
@@ -663,6 +704,162 @@ function movePage(fromUid, toUid, before){
   renderGrid(); updateStats(); persist();
 }
 
+// ==== 線レイヤー（スキャン図面から検出した線の重ね表示・第1段階） ==============
+// データは tools\make_lines.py が作る .lines.json（正規化座標・回転0基準）。
+// 既存の書き込み(annots)とは完全に別持ちなので、通常のPDF保存には一切影響しない。
+let lineLayerOn = true;
+// 保存座標（回転0基準）を、今の回転(p.rotation)での表示座標に変換する
+function dispLines(p){
+  const out=[]; if(!p || !p.lines) return out;
+  const r=((p.rotation%360)+360)%360;
+  const push=(o,pos,a,b)=>out.push({o,p:pos,a,b});
+  for(const s of (p.lines.h||[])){
+    if(r===0) push('h', s.p, s.a, s.b);
+    else if(r===90) push('v', 1-s.p, s.a, s.b);
+    else if(r===180) push('h', 1-s.p, 1-s.b, 1-s.a);
+    else push('v', s.p, 1-s.b, 1-s.a);
+  }
+  for(const s of (p.lines.v||[])){
+    if(r===0) push('v', s.p, s.a, s.b);
+    else if(r===90) push('h', s.p, 1-s.b, 1-s.a);
+    else if(r===180) push('v', 1-s.p, 1-s.b, 1-s.a);
+    else push('h', 1-s.p, s.a, s.b);
+  }
+  return out;
+}
+// プレビュー用：SVGの重ね（CSS拡大してもシャープ。クリックは透過）
+function lineSvgFor(p){
+  const segs=dispLines(p); if(!segs.length) return null;
+  const NS='http://www.w3.org/2000/svg';
+  const sv=document.createElementNS(NS,'svg');
+  sv.setAttribute('viewBox','0 0 1000 1000');
+  sv.setAttribute('preserveAspectRatio','none');
+  sv.setAttribute('class','lnsvg');
+  for(const s of segs){
+    const ln=document.createElementNS(NS,'line');
+    ln.setAttribute('x1',(((s.o==='h')?s.a:s.p)*1000).toFixed(1));
+    ln.setAttribute('y1',(((s.o==='h')?s.p:s.a)*1000).toFixed(1));
+    ln.setAttribute('x2',(((s.o==='h')?s.b:s.p)*1000).toFixed(1));
+    ln.setAttribute('y2',(((s.o==='h')?s.p:s.b)*1000).toFixed(1));
+    ln.setAttribute('vector-effect','non-scaling-stroke');
+    sv.appendChild(ln);
+  }
+  return sv;
+}
+// 書き込み画面・拡大ビューア用：canvasへ直接描く（注釈より下に重ねる）
+function drawLineLayer(ctx, p, W, Hh){
+  if(!lineLayerOn) return;
+  const segs=dispLines(p); if(!segs.length) return;
+  ctx.save();
+  ctx.strokeStyle='rgba(220,30,30,.55)';
+  ctx.lineWidth=Math.max(1.5, W*0.0009);
+  ctx.beginPath();
+  for(const s of segs){
+    if(s.o==='h'){ ctx.moveTo(s.a*W, s.p*Hh); ctx.lineTo(s.b*W, s.p*Hh); }
+    else{ ctx.moveTo(s.p*W, s.a*Hh); ctx.lineTo(s.p*W, s.b*Hh); }
+  }
+  ctx.stroke(); ctx.restore();
+}
+// .lines.json の取り込み：同じ名前のPDF/画像を探して、各ページに線データを付ける
+async function applyLinesJson(text){
+  let j=null;
+  try{ j=JSON.parse(text); }catch(_){ toast('JSONを読めませんでした'); return; }
+  if(!j || j.type!=='dwp-lines' || !Array.isArray(j.pages)){ toast('線レイヤー用のJSONではありません'); return; }
+  let docId=null;
+  for(const [id,d] of docs){ if(d.name===j.src){ docId=id; break; } }
+  if(!docId){ toast('「'+j.src+'」が見つかりません。先に元のPDFを取り込んでください'); return; }
+  let n=0;
+  for(const b of bundles) for(const p of b.pages){
+    if(p.docId!==docId) continue;
+    const pg=j.pages.find(q=>q.page===p.pageIndex+1);
+    if(pg){ p.lines={h:pg.h||[], v:pg.v||[]}; n++; }
+  }
+  lineLayerOn=true; document.body.classList.remove('nolines');
+  $('btnLines').textContent='📏 線:ON';
+  persist(); renderAll();
+  if(currentUid) showPreview(currentUid);
+  toast('線レイヤーを'+n+'ページに取り込みました（📏ボタンで表示ON/OFF）');
+}
+// ---- 自動検出（JSONドロップ不要の全自動版） ----
+// ベクター線・文字データを持たないページ（＝スキャン図面）は、最初に表示したときに
+// DWP自身が画像から線を検出して線レイヤーを作る。make_lines.py のJSONを落とせば上書きできる。
+async function renderBase0(p, longEdge){
+  // 回転0（保存座標の基準）でページを画像化する。renderPageCanvasと違い p.rotation を使わない
+  const doc=docs.get(p.docId); const cv=document.createElement('canvas');
+  if(doc.kind==='pdf'){
+    const page=await (await pdfjsOf(doc)).getPage(p.pageIndex+1);
+    const vp1=page.getViewport({scale:1, rotation:0});
+    const scale=longEdge/Math.max(vp1.width, vp1.height);
+    const vp=page.getViewport({scale, rotation:0});
+    cv.width=Math.ceil(vp.width); cv.height=Math.ceil(vp.height);
+    await page.render({canvasContext:cv.getContext('2d'), viewport:vp}).promise;
+  }else{
+    await paintImage(cv, doc, 0, {longEdge});
+  }
+  return cv;
+}
+function detectLinesFromCanvas(cv){
+  // make_lines.py と同じ考え方のJavaScript版：インク2%のしきい値 → 長い黒ラン → 隣の行とまとめて1本に
+  const W=cv.width, H=cv.height;
+  const d=cv.getContext('2d').getImageData(0,0,W,H).data;
+  const g=new Uint8Array(W*H);
+  for(let i=0,j=0;i<g.length;i++,j+=4){ g[i]=(d[j]+d[j+1]+d[j+2])/3|0; }
+  const hist=new Uint32Array(256);
+  for(let i=0;i<g.length;i++) hist[g[i]]++;
+  let acc=0, thr=235; const target=g.length*0.02;
+  for(let t=0;t<256;t++){ acc+=hist[t]; if(acc>=target){ thr=t; break; } }
+  thr=Math.min(235, Math.max(140, thr));
+  const LMIN=Math.max(20, Math.round(Math.max(W,H)*0.012));   // 紙上おおよそ5mm
+  const GAP=2;
+  function runs(horizontal){
+    const out=[]; const N1=horizontal?H:W, N2=horizontal?W:H;
+    for(let r=0;r<N1;r++){ let s=-1;
+      for(let c=0;c<=N2;c++){
+        const dark = c<N2 && g[horizontal ? r*W+c : c*W+r] < thr;
+        if(dark && s<0) s=c;
+        else if(!dark && s>=0){ if(c-s>=LMIN) out.push([r,s,c]); s=-1; }
+      }
+    }
+    return out;
+  }
+  function cluster(segs){
+    const done=[], act=[];
+    for(const sg of segs){ const y=sg[0], s=sg[1], e=sg[2]; let hit=null;
+      for(const c of act){ if(y-c[2]<=GAP && !(e<=c[0]-2 || s>=c[1]+2)){ hit=c; break; } }
+      if(hit){ if(s<hit[0])hit[0]=s; if(e>hit[1])hit[1]=e; hit[2]=y; hit[3]+=y; hit[4]++; }
+      else act.push([s,e,y,y,1]);
+      for(let i=act.length-1;i>=0;i--){ if(y-act[i][2]>GAP){ done.push(act[i]); act.splice(i,1); } }
+    }
+    for(const c of act) done.push(c);
+    return done.map(c=>({pos:c[3]/c[4], a:c[0], b:c[1], t:c[4]}));
+  }
+  const h=cluster(runs(true )).map(L=>({p:+(L.pos/H).toFixed(4), a:+(L.a/W).toFixed(4), b:+(L.b/W).toFixed(4), t:L.t}));
+  const v=cluster(runs(false)).map(L=>({p:+(L.pos/W).toFixed(4), a:+(L.a/H).toFixed(4), b:+(L.b/H).toFixed(4), t:L.t}));
+  return {h, v};
+}
+async function autoDetectLines(p){
+  if(!p || p.lines || p._lnBusy || p._lnSkip) return false;
+  p._lnBusy=true;
+  try{
+    const doc=docs.get(p.docId); if(!doc){ p._lnSkip=true; return false; }
+    if(doc.kind==='pdf'){
+      // 線・文字データを既に持つPDF（CAD出力など）は吸着が最初から効くので対象外
+      const page=await (await pdfjsOf(doc)).getPage(p.pageIndex+1);
+      const vp1=page.getViewport({scale:1, rotation:0});
+      const sn=await extractPageSnap(page, vp1);
+      if(sn.segs.length>=20 || sn.tpts.length>=10){ p._lnSkip=true; return false; }
+    }
+    const cv=await renderBase0(p, 2200);
+    const r=detectLinesFromCanvas(cv);
+    if(!r.h.length && !r.v.length){ p._lnSkip=true; return false; }
+    p.lines=r; persist();
+    if(!autoDetectLines._told){ autoDetectLines._told=true;
+      toast('ベクター線のない図面なので、線レイヤーを自動作成しました（📏 線:ON/OFFで切替）'); }
+    return true;
+  }catch(e){ console.error(e); p._lnSkip=true; return false; }
+  finally{ p._lnBusy=false; }
+}
+
 // ==== プレビュー（右ペイン） =================================================
 async function showPreview(uid){
   currentUid = uid;
@@ -672,6 +869,7 @@ async function showPreview(uid){
   const idx = pages.indexOf(p)+1;
   const na = (p.annots && p.annots.length) ? '　✎書込'+p.annots.length : '';
   $('pvinfo').innerHTML = 'ページ '+idx+' / '+pages.length+'　（元: '+esc(doc.name)+'）<br>回転: '+p.rotation+'°　種類: '+(doc.kind==='pdf'?'PDF':'画像')+na;
+  updatePvNav();
   try{
     const cv = document.createElement('canvas');
     if(doc.kind==='pdf'){
@@ -685,9 +883,83 @@ async function showPreview(uid){
       await paintImage(cv, doc, p.rotation, {height:1000});
     }
     if(p.annots && p.annots.length) drawAnnots(cv.getContext('2d'), p.annots, cv.width, cv.height);   // 注釈を重ねる
-    if(currentUid===uid){ cv.onclick=()=>openViewer(p); cv.title='クリックで拡大表示'; box.innerHTML=''; box.appendChild(cv); }
+    if(currentUid===uid){
+      cv.onclick=()=>openViewer(p); cv.title='クリック＝拡大表示　/　ホイール＝拡大縮小　/　Shift＋ホイール＝上下移動　/　ドラッグ＝移動';
+      const wrap=document.createElement('div'); wrap.className='lnwrap'; wrap.appendChild(cv);
+      const sv=lineSvgFor(p); if(sv) wrap.appendChild(sv);            // 検出線の重ね（あれば）
+      box.innerHTML=''; box.appendChild(wrap); pvZoom=1; applyPvZoom();
+      // スキャン図面なら裏で線を自動検出し、できたら表示し直す
+      if(!p.lines) autoDetectLines(p).then(ok=>{ if(ok && currentUid===uid) showPreview(uid); });
+    }
   }catch(e){ console.error(e); box.innerHTML='<div class="ph">プレビューできませんでした</div>'; }
 }
+// プレビューのページ送り（dir=-1:前 / +1:次）。サムネイル側もその位置まで自動でスクロールする。
+function pvStep(dir){
+  if(view!=='pages' || writeMode || !pages.length) return;
+  const i = pages.findIndex(p=>p.uid===currentUid);
+  const n = (i<0) ? (dir>0 ? 0 : pages.length-1) : i+dir;   // まだ何も表示していなければ端から始める
+  if(n<0 || n>=pages.length) return;
+  const p = pages[n];
+  showPreview(p.uid);
+  const el = gridEl.querySelector('.thumb[data-uid="'+p.uid+'"]');
+  if(el && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+}
+// 前へ/次への使える・使えないを今の位置に合わせる（端まで来たら押せなくする）
+function updatePvNav(){
+  const a=$('pvPrev'), b=$('pvNext'); if(!a||!b) return;
+  const on = (view==='pages' && !writeMode && pages.length>0);
+  const i = on ? pages.findIndex(p=>p.uid===currentUid) : -1;
+  a.disabled = !on || i<=0;
+  b.disabled = !on || (i>=0 && i>=pages.length-1);
+}
+// 右プレビューの拡大・縮小。1＝枠にちょうど収まる大きさで、そこから6倍まで。
+// 拡大するとプレビュー枠の中がスクロールできるようになる（枠自体の大きさは変わらない）。
+let pvZoom = 1, pvBaseW = 0;   // pvBaseW＝100%のときの実際の表示幅（これを倍にして拡大する）
+function applyPvZoom(){
+  const box=$('pvbox'); if(!box) return;
+  const cv=box.querySelector('canvas');
+  if(cv){
+    if(pvZoom<=1.001){
+      box.classList.remove('zoomed'); cv.style.width=''; cv.style.height='';
+      pvBaseW = cv.getBoundingClientRect().width;   // 等倍の実寸を基準として覚え直す
+    }else{
+      box.classList.add('zoomed');
+      if(!pvBaseW) pvBaseW = cv.getBoundingClientRect().width;
+      cv.style.width = Math.round(pvBaseW*pvZoom)+'px';
+      cv.style.height = 'auto';
+    }
+  }else{
+    box.classList.remove('zoomed'); pvBaseW = 0;
+  }
+  const lab=$('pvzlabel'); if(lab) lab.textContent = Math.round(pvZoom*100)+'%';
+  const o=$('pvOut'), i=$('pvIn'), f=$('pvFit');
+  if(o) o.disabled = !cv || pvZoom<=1.001;
+  if(f) f.disabled = !cv || pvZoom<=1.001;
+  if(i) i.disabled = !cv || pvZoom>=5.999;
+}
+// 倍率を変える。cx,cy（枠の左上からのカーソル位置）を渡すと、そこを基準に拡大縮小する。
+// モジュールグリッドの setZoom と同じ考え方＝拡大しても、カーソルの下にあるものが逃げない。
+function pvSetZoom(nz, cx, cy){
+  const box=$('pvbox'); if(!box) return;
+  const cv=box.querySelector('canvas'); if(!cv) return;
+  nz = Math.max(1, Math.min(6, nz));
+  if(Math.abs(nz-pvZoom) < 0.001) return;
+  const rb = box.getBoundingClientRect();
+  if(cx == null){ cx = box.clientWidth/2; cy = box.clientHeight/2; }
+  const gx = rb.left + cx, gy = rb.top + cy;        // カーソルの画面上の位置
+  // 拡大前：カーソルが画像のどのあたり（0〜1の比率）を指していたかを実測する。
+  // 計算だけで出すと、100%のときの「中央寄せ」のぶんズレるため、必ず実物の位置を測る。
+  const r0 = cv.getBoundingClientRect();
+  const px = (gx - r0.left) / r0.width, py = (gy - r0.top) / r0.height;
+  pvZoom = nz;
+  applyPvZoom();
+  // 拡大後：同じ比率の点がさっきと同じ画面位置へ来るように、スクロール量を補正する
+  const r1 = cv.getBoundingClientRect();
+  box.scrollLeft += (r1.left + px*r1.width) - gx;
+  box.scrollTop  += (r1.top  + py*r1.height) - gy;
+}
+function pvZoomBy(f){ pvSetZoom(pvZoom*f); }
+function pvFitReset(){ pvZoom = 1; applyPvZoom(); }
 
 // ==== 選択・操作 =============================================================
 function selectedPagesInOrder(){ return pages.filter(p=>selected.has(p.uid)); }
@@ -710,9 +982,11 @@ function updateStats(){
     $('cbInfo').textContent = '📄 '+(b?b.name:'')+'　全'+pages.length+'ページ';
     const has = pages.length>0, hasSel = selected.size>0;
     ['btnExportAll','btnPrint','btnSelAll','btnSelNone'].forEach(id=>$(id).disabled=!has);
-    ['btnExportSel','btnRotL','btnRotR','btnUp','btnDown','btnDel','btnExtract','btnPagesToGrid'].forEach(id=>$(id).disabled=!hasSel);
+    ['btnExportSel','btnRotL','btnRotR','btnUp','btnDown','btnDel','btnCopy','btnExtract','btnPagesToGrid'].forEach(id=>$(id).disabled=!hasSel);
     $('btnClear').disabled = true;   // 全消去はデスク画面で
   }
+  updatePvNav();
+  applyPvZoom();   // プレビューが空のときは拡大縮小も押せなくする
 }
 function selAll(){ pages.forEach(p=>selected.add(p.uid)); renderGrid(); updateStats(); }
 function selNone(){ selected.clear(); renderGrid(); updateStats(); }
@@ -967,6 +1241,7 @@ function redrawEditor(){
   if(!edCtx || !edBg) return;
   const cv=$('edcanvas'); edCtx.clearRect(0,0,cv.width,cv.height); edCtx.drawImage(edBg,0,0);
   const p=pages.find(x=>x.uid===edUid); if(!p) return;
+  drawLineLayer(edCtx, p, cv.width, cv.height);   // 検出線（書き込みより下に表示）
   drawAnnots(edCtx, p.annots, cv.width, cv.height);
   if(edCur) drawAnnots(edCtx, [edCur], cv.width, cv.height);    // ドラッグ中のプレビュー
   if(edSnapHit){   // 吸着先の水色マーク
@@ -1231,8 +1506,9 @@ function setWriteUI(on){
   const b=$('btnWrite'); b.classList.toggle('on', on);
   b.textContent = on ? '✓ 書き込み中：クリックで終了' : '✎ 書き込みモード：OFF';
   ['btnOpen','btnOpen2','btnExportAll','btnExportSel','btnPrint','btnClear',
-   'btnSelAll','btnSelNone','btnRotL','btnRotR','btnUp','btnDown','btnDel'].forEach(id=>{ const e=$(id); if(e) e.disabled = on; });
+   'btnSelAll','btnSelNone','btnRotL','btnRotR','btnUp','btnDown','btnDel','btnCopy','btnExtract'].forEach(id=>{ const e=$(id); if(e) e.disabled = on; });
   if(!on) updateStats();     // OFF時はページ有無に応じた本来の活性状態へ戻す
+  updatePvNav();             // 書き込み中はページ送りも止める
   const info=$('wmInfo');
   if(info){ const i=pages.findIndex(p=>p.uid===edUid); info.textContent = (on && i>=0) ? ('（'+(i+1)+'ページ目に書き込み中｜ホイール=拡大・スペース＋ドラッグ=移動）') : ''; }
 }
@@ -1268,8 +1544,10 @@ async function composePdf(target){
       let src=loaded.get(p.docId);
       if(!src){ src=await PDFLib.PDFDocument.load(copyOf(doc.bytes), {ignoreEncryption:true}); loaded.set(p.docId, src); }
       const [cp]=await out.copyPages(src, [p.pageIndex]);
-      const base=cp.getRotation().angle || 0;
-      cp.setRotation(PDFLib.degrees((base+p.rotation)%360));
+      // DWPは画面表示で元PDFの回転指示(/Rotate)を無視し、素の向きで見せている。
+      // 送り先(モジュールグリッド)や保存PDFもDWPの見た目に揃えるため、
+      // 元の/Rotateは引き継がず、DWP内で回した分(p.rotation)だけを回転指示にする。
+      cp.setRotation(PDFLib.degrees(p.rotation%360));
       out.addPage(cp);
     }else{
       const bytes=copyOf(doc.bytes);
@@ -1354,7 +1632,13 @@ async function showBundlePreview(bid){
       await paintImage(cv, doc, p.rotation, {height:1000});
     }
     if(p.annots && p.annots.length) drawAnnots(cv.getContext('2d'), p.annots, cv.width, cv.height);
-    if(showBundlePreview._last===bid){ cv.onclick=()=>openViewer(p); cv.title='クリックで拡大表示'; box.innerHTML=''; box.appendChild(cv); }
+    if(showBundlePreview._last===bid){
+      cv.onclick=()=>openViewer(p); cv.title='クリック＝拡大表示　/　ホイール＝拡大縮小　/　Shift＋ホイール＝上下移動　/　ドラッグ＝移動';
+      const wrap=document.createElement('div'); wrap.className='lnwrap'; wrap.appendChild(cv);
+      const sv=lineSvgFor(p); if(sv) wrap.appendChild(sv);
+      box.innerHTML=''; box.appendChild(wrap); pvZoom=1; applyPvZoom();
+      if(!p.lines) autoDetectLines(p).then(ok=>{ if(ok && showBundlePreview._last===bid) showBundlePreview(bid); });
+    }
   }catch(e){ console.error(e); box.innerHTML='<div class="ph">プレビューできませんでした</div>'; }
 }
 // --- デスクのドラッグ：真ん中に落とす=結合 / 端に落とす=並べ替え ---
@@ -1551,6 +1835,35 @@ function applyView(){
   $('cardPages').style.display = desk?'none':'';
 }
 // --- 選択ページを新しい書類として抜き出す ---
+// 選んだページを複製し、それぞれ元のページのすぐ後ろへ入れる。
+// ページは「元ファイルのどこを指すか」の参照なので、複製しても元ファイルは増えない（容量・画質そのまま）。
+// 書き込み(annots)は中身まで複製するので、複製先に書き足しても元ページには影響しない。
+function copySel(){
+  const b = curBundle(); if(!b) return;
+  const ps = selectedPagesInOrder(); if(!ps.length) return;
+  const set = new Set(ps.map(p=>p.uid));
+  const out=[], newUids=[];
+  for(const p of b.pages){
+    out.push(p);
+    if(!set.has(p.uid)) continue;
+    const cp = { uid:uidSeq++, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation,
+                 thumb:p.thumb||null, annots:cloneAnnots(p.annots), lines:p.lines||null };
+    out.push(cp); newUids.push(cp.uid);
+  }
+  b.pages = out; pages = b.pages;
+  selected.clear(); newUids.forEach(u=>selected.add(u));   // 複製したほうを選択状態にする
+  renderGrid(); updateStats(); persist();
+  toast(ps.length+'ページをコピーしました（元のページの後ろに追加）');
+}
+// 書き込みを中身ごと複製する（点の配列まで別物にして、元ページと繋がらないようにする）
+function cloneAnnots(annots){
+  if(!annots || !annots.length) return [];
+  return annots.map(a=>{
+    const c = Object.assign({}, a);
+    if(Array.isArray(a.pts)) c.pts = a.pts.map(pt=>Array.isArray(pt) ? pt.slice() : Object.assign({}, pt));
+    return c;
+  });
+}
 function extractSel(){
   const b = curBundle(); if(!b) return;
   const ps = selectedPagesInOrder(); if(!ps.length) return;
@@ -1604,7 +1917,7 @@ function persist(){
       bs.clear();
       bundles.forEach((b,i)=>{
         bs.put({ bid:b.bid, name:b.name, order:i,
-          pages:b.pages.map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, annots:p.annots||[], thumb:p.thumb||null})) });
+          pages:b.pages.map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, annots:p.annots||[], lines:p.lines||null, thumb:p.thumb||null})) });
       });
       tx.objectStore('meta').put({k:'seq', uidSeq, docSeq, bidSeq});
     }catch(e){ console.error(e); }
@@ -1633,7 +1946,7 @@ async function loadFromDb(){
   const metas= await readAllDb('meta');
   for(const s of srcs){ docs.set(s.id, {id:s.id, name:s.name, kind:s.kind, mime:s.mime, bytes:s.bytes, pdfjsDoc:null}); }
   bs.sort((a,b)=>a.order-b.order);
-  bundles = bs.map(r=>({bid:r.bid, name:r.name, pages:(r.pages||[]).map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, thumb:p.thumb||null, annots:p.annots||[]}))}));
+  bundles = bs.map(r=>({bid:r.bid, name:r.name, pages:(r.pages||[]).map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, thumb:p.thumb||null, annots:p.annots||[], lines:p.lines||null}))}));
   const m = metas.find(x=>x.k==='seq');
   if(m){ uidSeq=m.uidSeq||1; docSeq=m.docSeq||1; bidSeq=m.bidSeq||1; }
   else{
@@ -1758,6 +2071,7 @@ async function openViewer(p){
     // 画面解像度に合わせた長辺サイズで描画（1600〜3000px）＝文字まで読める鮮明さ
     const long = Math.min(3000, Math.max(1600, Math.round(Math.max(screen.width, screen.height) * (window.devicePixelRatio||1))));
     const cv = await renderPageCanvas(p, long);
+    drawLineLayer(cv.getContext('2d'), p, cv.width, cv.height);   // 検出線（あれば）
     if(p.annots && p.annots.length) drawAnnots(cv.getContext('2d'), p.annots, cv.width, cv.height);
     const dst=$('vcanvas');
     dst.width=cv.width; dst.height=cv.height;
@@ -1768,6 +2082,7 @@ async function openViewer(p){
     applyVScale();
     fitViewer(true);
   }catch(e){ console.error(e); toast('拡大表示に失敗しました'); $('viewer').classList.remove('on'); return; }
+  updateVNav();
   const t=$('toast'); t.classList.remove('on'); clearTimeout(toast._t);
 }
 function applyVScale(){
@@ -1781,6 +2096,37 @@ function fitViewer(center){
   if(center){ v.scrollLeft=(v.scrollWidth-v.clientWidth)/2; v.scrollTop=(v.scrollHeight-v.clientHeight)/2; }
 }
 function closeViewer(){ $('viewer').classList.remove('on'); }
+// 拡大ビューアのページ送り。今見ているページが入っている書類を探し、その中で前後へ動く。
+// （デスクから表紙を拡大したときも、その書類の中をめくれる）
+function vListOf(p){
+  if(!p) return [];
+  const b = bundles.find(x=>x.pages.some(q=>q.uid===p.uid));
+  return b ? b.pages : [];
+}
+function vStep(dir){
+  const p = openViewer._p; if(!p) return;
+  const list = vListOf(p);
+  const i = list.findIndex(q=>q.uid===p.uid); if(i<0) return;
+  const n = i+dir; if(n<0 || n>=list.length) return;
+  const np = list[n];
+  openViewer(np);
+  // 中身画面を開いているときは、右プレビューとサムネイルも同じページへ合わせておく
+  if(view==='pages' && pages.some(q=>q.uid===np.uid)){
+    showPreview(np.uid);
+    const el = gridEl.querySelector('.thumb[data-uid="'+np.uid+'"]');
+    if(el && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+  }
+}
+// ビューアの前後ボタンと「3 / 12」の位置表示を今のページに合わせる
+function updateVNav(){
+  const a=$('vPrev'), b=$('vNext'), pos=$('vpos'); if(!a||!b) return;
+  const p = openViewer._p;
+  const list = vListOf(p);
+  const i = p ? list.findIndex(q=>q.uid===p.uid) : -1;
+  a.disabled = i<=0;
+  b.disabled = i<0 || i>=list.length-1;
+  if(pos) pos.textContent = (i>=0) ? ((i+1)+' / '+list.length) : '';
+}
 // このページ1枚だけをPDF化して「別ウィンドウ」で開く（書き込み中の参照用にも使う）。
 // 拡大・印刷はChrome内蔵のPDFビューア側で自由にできる。
 async function openPageInWindow(p){
@@ -1820,6 +2166,19 @@ $('btnDel').onclick = delSel;
 
 // ---- デスク（書類）まわりの配線 ----
 $('btnBack').onclick = backToDesk;
+$('btnLines').onclick = ()=>{
+  lineLayerOn = !lineLayerOn;
+  $('btnLines').textContent = lineLayerOn ? '📏 線:ON' : '📏 線:OFF';
+  document.body.classList.toggle('nolines', !lineLayerOn);            // SVG側はCSSで即切替
+  if($('editor').classList.contains('on')) redrawEditor();            // 書き込み画面は描き直し
+  if($('viewer').classList.contains('on') && openViewer._p) openViewer(openViewer._p);   // ビューアも
+};
+$('pvIn').onclick  = ()=>pvZoomBy(1.25);
+$('pvOut').onclick = ()=>pvZoomBy(1/1.25);
+$('pvFit').onclick = pvFitReset;
+$('pvPrev').onclick = ()=>pvStep(-1);
+$('pvNext').onclick = ()=>pvStep(1);
+$('btnCopy').onclick = copySel;
 $('btnExtract').onclick = extractSel;
 $('btnMerge').onclick = mergeSel;
 $('btnExplode').onclick = explodeSel;
@@ -1844,11 +2203,19 @@ $('btnPagesToGrid').onclick = sendPagesToModuleGrid;
 
 // ---- 拡大ビューアの配線 ----
 $('vclose').onclick = closeViewer;
+$('vPrev').onclick = ()=>vStep(-1);
+$('vNext').onclick = ()=>vStep(1);
 $('vopen').onclick = ()=>{ if(openViewer._p) openPageInWindow(openViewer._p); };
 $('edOpenWin').onclick = ()=>{ const p = pages.find(x=>x.uid===edUid); if(p) openPageInWindow(p); };
-$('viewer').addEventListener('click',(e)=>{ if(e.target===$('viewer')) closeViewer(); });
+let vDragMoved = 0;   // 直前のドラッグで動いた量。つかんで動かしただけのときは閉じない用
+$('viewer').addEventListener('click',(e)=>{
+  const moved = vDragMoved; vDragMoved = 0;
+  if(moved>6) return;                              // 画像をつかんで動かした直後＝閉じない
+  if(e.target===$('viewer')) closeViewer();        // 何もない背景をクリックしたときだけ閉じる
+});
 window.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && $('viewer').classList.contains('on')) closeViewer(); });
 $('viewer').addEventListener('wheel',(e)=>{
+  if(e.shiftKey){ e.preventDefault(); $('viewer').scrollTop += e.deltaY; return; }   // Shift＋ホイール＝上下移動
   e.preventDefault();
   const v=$('viewer'), r=v.getBoundingClientRect();
   const cx=e.clientX-r.left, cy=e.clientY-r.top, old=vScale;
@@ -1860,11 +2227,53 @@ $('viewer').addEventListener('wheel',(e)=>{
   v.scrollTop=(v.scrollTop+cy)*f-cy;
 },{passive:false});
 (function(){   // つかんでスクロール（図面の見たい場所へ移動）
+  // setPointerCapture は使わない。捕捉するとクリックがビューア本体に横取りされ、
+  // 画像をクリックしただけでも「背景クリック＝閉じる」と誤判定されるため。
   const v=$('viewer'); let drag=null;
-  v.addEventListener('pointerdown',(e)=>{ if(e.target.id!=='vcanvas') return; drag={x:e.clientX, y:e.clientY, sl:v.scrollLeft, st:v.scrollTop}; try{ v.setPointerCapture(e.pointerId); }catch(_){} });
-  v.addEventListener('pointermove',(e)=>{ if(!drag) return; v.scrollLeft=drag.sl-(e.clientX-drag.x); v.scrollTop=drag.st-(e.clientY-drag.y); });
-  v.addEventListener('pointerup',()=>{ drag=null; });
-  v.addEventListener('pointercancel',()=>{ drag=null; });
+  v.addEventListener('pointerdown',(e)=>{
+    if(e.target.id!=='vcanvas') return;
+    drag={x:e.clientX, y:e.clientY, sl:v.scrollLeft, st:v.scrollTop}; vDragMoved=0;
+  });
+  window.addEventListener('pointermove',(e)=>{
+    if(!drag) return;
+    const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+    vDragMoved=Math.max(vDragMoved, Math.abs(dx)+Math.abs(dy));
+    v.scrollLeft=drag.sl-dx; v.scrollTop=drag.st-dy;
+  });
+  window.addEventListener('pointerup',()=>{ drag=null; });
+  window.addEventListener('pointercancel',()=>{ drag=null; });
+})();
+
+// ---- 右プレビューのマウス操作（モジュールグリッドと同じ操作感） ----
+// 素のホイール＝拡大縮小（Ctrl不要・カーソル位置が基準）／ Shift＋ホイール＝上下移動 ／ ドラッグ＝移動
+$('pvbox').addEventListener('wheel',(e)=>{
+  const box=$('pvbox'); if(!box.querySelector('canvas')) return;
+  if(e.shiftKey){ e.preventDefault(); box.scrollTop += e.deltaY; return; }
+  e.preventDefault();
+  const r = box.getBoundingClientRect();
+  pvSetZoom(pvZoom * (e.deltaY<0 ? 1.2 : 1/1.2), e.clientX-r.left, e.clientY-r.top);
+},{passive:false});
+(function(){   // つかんで移動（左ボタン・中ボタンどちらでも）
+  // 注意：setPointerCapture は使わない。捕捉するとクリックがこの枠に横取りされ、
+  //       画像のクリック（＝拡大表示）が届かなくなるため。画面全体で指を追う方式にする。
+  const box=$('pvbox'); let drag=null, moved=0;
+  box.addEventListener('pointerdown',(e)=>{
+    if(!box.querySelector('canvas')) return;
+    if(e.button!==0 && e.button!==1) return;
+    drag={x:e.clientX, y:e.clientY, sl:box.scrollLeft, st:box.scrollTop}; moved=0;
+  });
+  window.addEventListener('pointermove',(e)=>{
+    if(!drag) return;
+    const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+    moved=Math.max(moved, Math.abs(dx)+Math.abs(dy));
+    if(moved<=6) return;                        // 少し震えただけならクリック扱い
+    box.scrollLeft=drag.sl-dx; box.scrollTop=drag.st-dy;
+    box.style.cursor='grabbing';
+  });
+  window.addEventListener('pointerup',()=>{ drag=null; box.style.cursor=''; });
+  window.addEventListener('pointercancel',()=>{ drag=null; box.style.cursor=''; });
+  // つかんで動かしたときだけ「クリック＝拡大表示」を出さない（毎回リセットして持ち越さない）
+  box.addEventListener('click',(e)=>{ if(moved>6){ e.stopPropagation(); e.preventDefault(); } moved=0; }, true);
 })();
 
 // ---- 書き込み（注釈）まわりの配線 ----
