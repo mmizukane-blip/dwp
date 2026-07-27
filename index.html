@@ -142,6 +142,14 @@ button.warn{color:var(--rd);}
 .bundle.drop-before{box-shadow:-3px 0 0 var(--bl), 2px 2px 0 var(--bg3);}
 .bundle.drop-after{box-shadow:3px 0 0 var(--bl), 2px 2px 0 var(--bg3);}
 .bundle.drop-merge{border-color:var(--gn); box-shadow:0 0 0 3px rgba(26,127,55,.35);}
+/* ---- フォルダ（書類を溜め込む入れ物。デスク直下の1階層のみ） ---- */
+#deskpath{flex-basis:100%; width:100%; display:flex; align-items:center; gap:10px; padding:2px 2px 4px;}
+#deskpath .fname{font-weight:700; font-size:13.5px;}
+#deskpath .fcnt{color:var(--text3); font-size:12px;}
+.bundle.folder .imgbox{display:flex; align-items:center; justify-content:center; font-size:60px; user-select:none;}
+.bundle.folder .fops{position:absolute; top:4px; right:4px; display:flex; gap:3px;}
+.bundle.folder .fops button{font-size:11px; padding:2px 6px;}
+.bundle.folder.drop-into{border-color:var(--bl); box-shadow:0 0 0 3px rgba(47,111,235,.35);}
 .bundle .imgbox{
   width:100%; height:150px; display:flex; align-items:center; justify-content:center;
   background:var(--bg3); border-radius:4px; overflow:hidden;
@@ -348,12 +356,16 @@ body.nolines .lnsvg{display:none;}
         <button id="btnOpen2" class="primary" style="justify-content:center;">📂 ファイルを選ぶ</button>
         <button id="btnInbox" style="justify-content:center;">📥 受け皿フォルダを設定</button>
       </div>
-      <div class="hint">PDF・画像（PNG / JPEG）に対応。ここへ、または画面へ<b>ドラッグ＆ドロップ</b>でも取り込めます。<b>1ファイル＝1つの書類（束）</b>としてデスクに並びます。<br>🖨 <b>印刷から直接入れる</b>：受け皿フォルダを設定し、印刷時にプリンタ「<b>Microsoft Print to PDF</b>」で<b>そのフォルダへ保存</b>すると、数秒でデスクに届きます（取り込み後、受け皿からは自動で消えます）。</div>
+      <div class="hint">PDF・画像（PNG / JPEG）に対応。ここへ、または画面へ<b>ドラッグ＆ドロップ</b>でも取り込めます。<b>1ファイル＝1つの書類（束）</b>としてデスクに並びます。<br>🖨 <b>印刷から直接入れる</b>：受け皿フォルダを設定し、印刷時にプリンタ「<b>Microsoft Print to PDF</b>」で<b>そのフォルダへ保存</b>すると、数秒でデスクに届きます（取り込み後、受け皿からは自動で消えます）。<br>📋 <b>スクショ貼り付け</b>：<b>Win+Shift+S</b> で画面を撮って、この画面で <b>Ctrl+V</b>。そのまま書類になります。</div>
     </div>
 
     <div class="card" id="cardDesk">
       <h2><span class="num">2</span>書類の操作</h2>
       <div class="grp">
+        <div class="rowbtns">
+          <button id="btnNewFolder" title="書類を溜め込むフォルダをデスクに作る">📁 新規フォルダ</button>
+          <button id="btnUnfold" title="選択した書類をフォルダから出してデスクへ戻す">📤 外に出す</button>
+        </div>
         <div class="rowbtns">
           <button id="btnMerge">📎 結合</button>
           <button id="btnExplode">💥 ばらす</button>
@@ -365,7 +377,7 @@ body.nolines .lnsvg{display:none;}
         <button id="btnToGrid" style="justify-content:center;">📐 モジュールグリッドで開く</button>
         <button id="btnDelDoc" class="warn" style="justify-content:center;">🗑 書類を削除</button>
       </div>
-      <div class="hint">書類は<b>ダブルクリックで開いて</b>中身を編集。書類を<b>書類の真ん中へドラッグ</b>すると1つに結合、端に寄せると並べ替え。「ばらす」は1ページずつの書類に分解します。</div>
+      <div class="hint">書類は<b>ダブルクリックで開いて</b>中身を編集。書類を<b>書類の真ん中へドラッグ</b>すると1つに結合、端に寄せると並べ替え。「ばらす」は1ページずつの書類に分解します。<br>📁 <b>フォルダ</b>：書類を<b>ドラッグで放り込んで</b>整理（<b>レ点を付けてからドラッグすると、まとめて入ります</b>）。<b>ダブルクリック</b>で中を開き「⬆ デスクへ戻る」で戻ります。フォルダ同士も<b>ドラッグで並べ替え</b>できます。フォルダを開いたまま取り込むと、その中に入ります。</div>
     </div>
 
     <div class="card" id="cardPages" style="display:none;">
@@ -546,6 +558,48 @@ async function handleFiles(fileList){
   if(added){ renderAll(); toast(added+'ページ取り込みました'); }
 }
 
+// ==== クリップボードから貼り付け（スクショ→Ctrl+Vで書類になる） ==============
+// PNG/JPEG以外（BMP等）で来た画像は、canvasを通してPNGに変換してから取り込む
+// （そのまま入れると、PDF保存のときに画像の埋め込みで失敗するため）。
+async function blobToPngFile(blob, name){
+  const url = URL.createObjectURL(blob);
+  try{
+    const img = await new Promise((ok,ng)=>{ const im=new Image(); im.onload=()=>ok(im); im.onerror=ng; im.src=url; });
+    const cv = document.createElement('canvas');
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    cv.getContext('2d').drawImage(img, 0, 0);
+    const out = await new Promise(ok=>cv.toBlob(ok, 'image/png'));
+    return new File([out], name, {type:'image/png'});
+  }finally{ URL.revokeObjectURL(url); }
+}
+window.addEventListener('paste', async (e)=>{
+  if($('editor').classList.contains('on')) return;                                   // 書き込み中は対象外
+  if(e.target && e.target.closest && e.target.closest('input,textarea')) return;     // 入力欄への貼り付けは邪魔しない
+  const items = (e.clipboardData && e.clipboardData.items) ? Array.from(e.clipboardData.items) : [];
+  const imgs = items.filter(it=>it.kind==='file' && /^image\//i.test(it.type));
+  if(!imgs.length) return;
+  e.preventDefault();
+  let n=0;
+  for(const it of imgs){
+    const blob = it.getAsFile(); if(!blob) continue;
+    const d=new Date(), z=(x)=>String(x).padStart(2,'0');
+    const stamp = z(d.getMonth()+1)+z(d.getDate())+'-'+z(d.getHours())+z(d.getMinutes())+z(d.getSeconds());
+    try{
+      let file;
+      if(/^image\/(png|jpeg)$/i.test(blob.type)){
+        file = new File([blob], '貼り付け_'+stamp+(/png/i.test(blob.type)?'.png':'.jpg'), {type:blob.type});
+      }else{
+        file = await blobToPngFile(blob, '貼り付け_'+stamp+'.png');
+      }
+      await addImage(file); n++;
+    }catch(err){ console.error(err); }
+  }
+  if(n){
+    const where = (view==='pages') ? '（デスクに追加されています）' : (deskFid!=null ? '（開いているフォルダに入りました）' : '');
+    toast('クリップボードから'+n+'枚を書類として取り込みました'+where);
+  }
+});
+
 function baseName(name){ return String(name).replace(/\.[^.]+$/,''); }
 async function addPdf(file){
   const bytes = await fileToBytes(file);
@@ -559,7 +613,7 @@ async function addPdf(file){
   for(let i=0;i<n;i++){
     newPages.push({ uid:uidSeq++, docId:id, pageIndex:i, rotation:0, thumb:null, annots:[] });
   }
-  const b = { bid:bidSeq++, name:baseName(file.name), pages:newPages };   // 1ファイル=1書類
+  const b = { bid:bidSeq++, name:baseName(file.name), pages:newPages, fid:deskFid };   // 1ファイル=1書類（開いているフォルダに入る）
   bundles.push(b);
   renderAll();
   // サムネイルは順次生成（重い処理なので描画を止めない）
@@ -575,7 +629,7 @@ async function addImage(file){
   docs.set(id, { id, name:file.name, kind:'image', bytes, pdfjsDoc:null, mime });
   putSourceDb(docs.get(id));
   const p = { uid:uidSeq++, docId:id, pageIndex:0, rotation:0, thumb:null, annots:[] };
-  const b = { bid:bidSeq++, name:baseName(file.name), pages:[p] };
+  const b = { bid:bidSeq++, name:baseName(file.name), pages:[p], fid:deskFid };
   bundles.push(b);
   renderAll();
   await makeThumb(p); updateThumbEl(p); refreshBundleEl(b);
@@ -975,7 +1029,8 @@ function updateStats(){
     $('btnClear').disabled = !has;
     $('btnExportSel').disabled = !hasSel;
     $('btnPrint').disabled = !hasSel;
-    ['btnMerge','btnExplode','btnRename','btnSaveDoc','btnDelDoc','btnToGrid'].forEach(id=>$(id).disabled=!hasSel);
+    ['btnMerge','btnExplode','btnRename','btnSaveDoc','btnDelDoc','btnToGrid','btnUnfold'].forEach(id=>$(id).disabled=!hasSel);
+    $('btnNewFolder').disabled = false;
   }else{
     const b = curBundle();
     $('stSel').textContent = selected.size;
@@ -1031,6 +1086,7 @@ function clearAll(){
   if(!bundles.length) return;
   if(!confirm('デスクの書類をすべて消去します（アプリ内の保存データも消えます）。よろしいですか？（PDFに保存したファイルには影響しません）')) return;
   docs.clear(); bundles=[]; pages=[]; selected.clear(); deskSel.clear(); currentUid=null; openBid=null;
+  folders=[]; deskFid=null; fidSeq=1;
   clearDb();
   setTimeout(saveInboxHandle, 300);   // 受け皿フォルダの設定だけは消さずに残す
   view='desk'; applyView(); renderAll();
@@ -1565,16 +1621,43 @@ function renderAll(){
   if(view==='desk') renderDesk(); else renderGrid();
   updateStats();
 }
+// ==== フォルダ（書類を溜め込む入れ物。デスク直下の1階層のみ） ================
+let folders = [];        // {fid, name}
+let deskFid = null;      // いま開いているフォルダ（null=デスクの一番上）
+let fidSeq = 1;
+
 function renderDesk(){
   const dk = $('desk');
   dk.innerHTML='';
-  if(!bundles.length){
-    dk.innerHTML = '<div id="deskempty"><div class="big">🗂</div><h3>デスクに書類がありません</h3>'+
-      '<p>「📂 取り込む」またはここへの<b>ドラッグ＆ドロップ</b>でPDF・画像を読み込むと、<br><b>1ファイル＝1つの書類（束）</b>として並びます。<br>書類を書類の真ん中に重ねると<b>結合</b>、ダブルクリックで<b>中身</b>を開けます。</p></div>';
-    $('deskempty').addEventListener('click', ()=>$('file').click());
+  if(deskFid!=null && !folders.some(f=>f.fid===deskFid)) deskFid=null;   // 開いていたフォルダが消えたら一番上へ
+  // フォルダの中を開いているとき：現在地バー
+  if(deskFid!=null){
+    const f=folders.find(x=>x.fid===deskFid);
+    const bar=document.createElement('div');
+    bar.id='deskpath';
+    bar.innerHTML='<button id="btnFolderUp">⬆ デスクへ戻る</button>'+
+      '<span class="fname">📁 '+esc(f.name)+'</span>'+
+      '<span class="fcnt">'+bundles.filter(b=>(b.fid||null)===deskFid).length+'冊</span>';
+    dk.appendChild(bar);
+    bar.querySelector('#btnFolderUp').onclick=()=>{ deskFid=null; deskSel.clear(); renderAll(); };
+  }
+  const showFolders = (deskFid==null) ? folders : [];
+  const showBundles = bundles.filter(b=>(b.fid||null)===deskFid);
+  if(!showFolders.length && !showBundles.length){
+    if(deskFid==null){
+      dk.innerHTML = '<div id="deskempty"><div class="big">🗂</div><h3>デスクに書類がありません</h3>'+
+        '<p>「📂 取り込む」またはここへの<b>ドラッグ＆ドロップ</b>でPDF・画像を読み込むと、<br><b>1ファイル＝1つの書類（束）</b>として並びます。<br>書類を書類の真ん中に重ねると<b>結合</b>、ダブルクリックで<b>中身</b>を開けます。</p></div>';
+      $('deskempty').addEventListener('click', ()=>$('file').click());
+    }else{
+      const em=document.createElement('div');
+      em.style.cssText='flex-basis:100%; text-align:center; color:var(--text3); font-size:12.5px; padding:36px 0; line-height:1.9;';
+      em.innerHTML='このフォルダは空です。<br>「⬆ デスクへ戻る」で戻り、書類をこのフォルダに<b>ドラッグ</b>して入れられます。<br>（このまま取り込むと、新しい書類はこのフォルダに入ります）';
+      dk.appendChild(em);
+    }
     return;
   }
-  bundles.forEach(b=>{
+  showFolders.forEach(f=>{ dk.appendChild(folderTile(f)); });
+  showBundles.forEach(b=>{
     const el = document.createElement('div');
     el.className = 'bundle' + (deskSel.has(b.bid)?' sel':'');
     el.dataset.bid = b.bid;
@@ -1602,6 +1685,114 @@ function renderDesk(){
     bindDeskDnD(el);
     dk.appendChild(el);
   });
+}
+// --- フォルダのタイル（ダブルクリックで開く／書類をドロップで中に入れる） ---
+function folderTile(f){
+  const cnt = bundles.filter(b=>(b.fid||null)===f.fid).length;
+  const el = document.createElement('div');
+  el.className = 'bundle folder';
+  el.dataset.fid = f.fid;
+  el.title = 'ダブルクリックで開く／書類をドラッグして入れる';
+  el.innerHTML =
+    '<span class="bpages">'+cnt+'冊</span>' +
+    '<div class="imgbox">📁</div>' +
+    '<div class="bname" title="'+esc(f.name)+'">'+esc(f.name)+'</div>' +
+    '<div class="fops"><button class="frename" title="フォルダ名を変更">✏</button><button class="fdel" title="フォルダを削除（中の書類はデスクへ戻す）">🗑</button></div>';
+  el.addEventListener('dblclick', ()=>{ deskFid=f.fid; deskSel.clear(); renderAll(); });
+  el.querySelector('.frename').onclick=(ev)=>{ ev.stopPropagation(); renameFolder(f.fid); };
+  el.querySelector('.fdel').onclick=(ev)=>{ ev.stopPropagation(); deleteFolder(f.fid); };
+  // フォルダ自身もドラッグ可＝フォルダ同士の並べ替えに使う
+  el.draggable = true;
+  el.addEventListener('dragstart',(e)=>{ dragFid=f.fid; e.dataTransfer.effectAllowed='move'; try{ e.dataTransfer.setData('text/plain','f'+f.fid); }catch(_){} });
+  el.addEventListener('dragend', ()=>{ dragFid=null; clearDeskMark(); });
+  bindFolderDrop(el, f.fid);
+  return el;
+}
+let dragFid = null;   // ドラッグ中のフォルダ（並べ替え用）
+// 書類タイルをフォルダタイルへドロップ＝フォルダに入れる
+function bindFolderDrop(el, fid){
+  el.addEventListener('dragover',(e)=>{
+    if(dragFid!=null && dragFid!==fid){                  // フォルダ同士＝並べ替え（左半分=前へ/右半分=後ろへ）
+      e.preventDefault(); if(e.dataTransfer) e.dataTransfer.dropEffect='move';
+      clearDeskMark();
+      const r=el.getBoundingClientRect();
+      el.classList.add(((e.clientX-r.left)/r.width < 0.5) ? 'drop-before' : 'drop-after');
+      return;
+    }
+    if(dragBid==null) return;
+    e.preventDefault(); if(e.dataTransfer) e.dataTransfer.dropEffect='move';
+    clearDeskMark(); el.classList.add('drop-into');
+  });
+  el.addEventListener('dragleave',()=>el.classList.remove('drop-into','drop-before','drop-after'));
+  el.addEventListener('drop',(e)=>{
+    e.preventDefault(); e.stopPropagation(); el.classList.remove('drop-into','drop-before','drop-after');
+    if(dragFid!=null && dragFid!==fid){                  // フォルダの並べ替えを確定
+      const r=el.getBoundingClientRect();
+      moveFolder(dragFid, fid, (e.clientX-r.left)/r.width < 0.5);
+      return;
+    }
+    if(dragBid==null) return;
+    // レ点付きの書類をドラッグしたときは、レ点の全書類をまとめて入れる。
+    // レ点なしの書類をドラッグしたときは、その1冊だけ（Windowsの選択と同じ流儀）。
+    const ids = deskSel.has(dragBid) ? Array.from(deskSel) : [dragBid];
+    const moved = [];
+    for(const id of ids){
+      const b=bundles.find(x=>x.bid===id);
+      if(b){ b.fid=fid; moved.push(b); deskSel.delete(id); }
+    }
+    if(!moved.length) return;
+    renderAll(); persist();
+    const f=folders.find(x=>x.fid===fid);
+    toast(moved.length===1
+      ? '「'+moved[0].name+'」をフォルダ「'+(f?f.name:'')+'」に入れました'
+      : moved.length+'冊をまとめてフォルダ「'+(f?f.name:'')+'」に入れました');
+  });
+}
+// フォルダ同士の並べ替え（moveBundle と同じ考え方）
+function moveFolder(fromFid, toFid, before){
+  const i=folders.findIndex(f=>f.fid===fromFid);
+  if(i<0) return;
+  const moved=folders.splice(i,1)[0];
+  let j=folders.findIndex(f=>f.fid===toFid);
+  if(!before) j+=1;
+  folders.splice(j,0,moved);
+  renderAll(); persist();
+}
+function createFolder(){
+  const name = prompt('フォルダ名を入力してください', '新しいフォルダ');
+  if(name==null) return;
+  const f = { fid:fidSeq++, name:(name.trim()||'新しいフォルダ') };
+  folders.push(f);
+  deskFid = null;              // フォルダは一番上に作る（フォルダの中にフォルダは作らない）
+  renderAll(); persist();
+  toast('フォルダ「'+f.name+'」を作りました。書類をドラッグで入れられます');
+}
+function renameFolder(fid){
+  const f=folders.find(x=>x.fid===fid); if(!f) return;
+  const name=prompt('フォルダ名', f.name); if(name==null) return;
+  f.name = name.trim()||f.name;
+  renderAll(); persist();
+}
+function deleteFolder(fid){
+  const f=folders.find(x=>x.fid===fid); if(!f) return;
+  const inside=bundles.filter(b=>(b.fid||null)===fid);
+  const msg = inside.length
+    ? 'フォルダ「'+f.name+'」を削除します。中の'+inside.length+'冊の書類はデスクに戻します。よろしいですか？'
+    : 'フォルダ「'+f.name+'」を削除します。よろしいですか？';
+  if(!confirm(msg)) return;
+  inside.forEach(b=>{ b.fid=null; });
+  folders=folders.filter(x=>x.fid!==fid);
+  if(deskFid===fid) deskFid=null;
+  renderAll(); persist();
+  toast('フォルダを削除しました'+(inside.length?('（中の'+inside.length+'冊はデスクへ）'):''));
+}
+// 選択した書類をフォルダから出してデスクへ戻す
+function unfoldSel(){
+  const sel=deskSelected().filter(b=>b.fid!=null);
+  if(!sel.length){ toast('フォルダの中の書類を選んでください（フォルダを開いてレ点）'); return; }
+  sel.forEach(b=>{ b.fid=null; });
+  renderAll(); persist();
+  toast(sel.length+'冊をデスクへ出しました');
 }
 // 表紙サムネとページ数だけ差し替え（全再描画を避ける）
 function refreshBundleEl(b){
@@ -1670,7 +1861,7 @@ function dropZone(e, el){
   const r=el.getBoundingClientRect(); const x=(e.clientX-r.left)/r.width;
   if(x<0.25) return 'before'; if(x>0.75) return 'after'; return 'merge';
 }
-function clearDeskMark(){ $('desk').querySelectorAll('.drop-before,.drop-after,.drop-merge').forEach(x=>x.classList.remove('drop-before','drop-after','drop-merge')); }
+function clearDeskMark(){ $('desk').querySelectorAll('.drop-before,.drop-after,.drop-merge,.drop-into').forEach(x=>x.classList.remove('drop-before','drop-after','drop-merge','drop-into')); }
 function moveBundle(fromBid, toBid, before){
   const i = bundles.findIndex(b=>b.bid===fromBid);
   const moved = bundles.splice(i,1)[0];
@@ -1711,7 +1902,7 @@ function explodeSel(){
   const out=[];
   for(const b of bundles){
     if(!deskSel.has(b.bid) || b.pages.length<=1){ out.push(b); continue; }
-    b.pages.forEach((p,i)=>{ out.push({ bid:bidSeq++, name:b.name+'-'+(i+1), pages:[p] }); });
+    b.pages.forEach((p,i)=>{ out.push({ bid:bidSeq++, name:b.name+'-'+(i+1), pages:[p], fid:b.fid||null }); });   // ばらした先も同じ場所
     deskSel.delete(b.bid);
   }
   bundles = out;
@@ -1871,7 +2062,7 @@ function extractSel(){
   const set = new Set(ps.map(p=>p.uid));
   b.pages = b.pages.filter(p=>!set.has(p.uid));
   pages = b.pages;
-  const nb = { bid:bidSeq++, name:b.name+'（抜き出し）', pages:ps };
+  const nb = { bid:bidSeq++, name:b.name+'（抜き出し）', pages:ps, fid:b.fid||null };   // 元の書類と同じ場所に置く
   bundles.push(nb);
   selected.clear();
   renderGrid(); updateStats(); persist();
@@ -1916,10 +2107,11 @@ function persist(){
       const bs=tx.objectStore('bundles');
       bs.clear();
       bundles.forEach((b,i)=>{
-        bs.put({ bid:b.bid, name:b.name, order:i,
+        bs.put({ bid:b.bid, name:b.name, order:i, fid:b.fid||null,
           pages:b.pages.map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, annots:p.annots||[], lines:p.lines||null, thumb:p.thumb||null})) });
       });
       tx.objectStore('meta').put({k:'seq', uidSeq, docSeq, bidSeq});
+      tx.objectStore('meta').put({k:'folders', folders:folders.map(f=>({fid:f.fid, name:f.name})), fidSeq});
     }catch(e){ console.error(e); }
   }, 600);
 }
@@ -1946,7 +2138,12 @@ async function loadFromDb(){
   const metas= await readAllDb('meta');
   for(const s of srcs){ docs.set(s.id, {id:s.id, name:s.name, kind:s.kind, mime:s.mime, bytes:s.bytes, pdfjsDoc:null}); }
   bs.sort((a,b)=>a.order-b.order);
-  bundles = bs.map(r=>({bid:r.bid, name:r.name, pages:(r.pages||[]).map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, thumb:p.thumb||null, annots:p.annots||[], lines:p.lines||null}))}));
+  bundles = bs.map(r=>({bid:r.bid, name:r.name, fid:r.fid||null, pages:(r.pages||[]).map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, thumb:p.thumb||null, annots:p.annots||[], lines:p.lines||null}))}));
+  const mf = metas.find(x=>x.k==='folders');
+  if(mf){
+    folders = (mf.folders||[]).map(f=>({fid:f.fid, name:f.name}));
+    fidSeq = mf.fidSeq || (folders.reduce((a,f)=>Math.max(a,f.fid),0)+1);
+  }
   const m = metas.find(x=>x.k==='seq');
   if(m){ uidSeq=m.uidSeq||1; docSeq=m.docSeq||1; bidSeq=m.bidSeq||1; }
   else{
@@ -2180,6 +2377,8 @@ $('pvPrev').onclick = ()=>pvStep(-1);
 $('pvNext').onclick = ()=>pvStep(1);
 $('btnCopy').onclick = copySel;
 $('btnExtract').onclick = extractSel;
+$('btnNewFolder').onclick = createFolder;
+$('btnUnfold').onclick = unfoldSel;
 $('btnMerge').onclick = mergeSel;
 $('btnExplode').onclick = explodeSel;
 $('btnRename').onclick = renameSel;
