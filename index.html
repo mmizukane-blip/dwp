@@ -288,7 +288,7 @@ body.nolines .lnsvg{display:none;}
     <div class="sep"></div>
     <button id="btnClear" class="warn">🗑 全消去</button>
   </div>
-  <input type="file" id="file" accept="application/pdf,image/png,image/jpeg,.json" multiple hidden>
+  <input type="file" id="file" accept="application/pdf,image/png,image/jpeg,.json,.dwpbk" multiple hidden>
 </header>
 
 <!-- タイトルバー直下：書き込みモードのON/OFFと道具（ON時だけ道具を表示） -->
@@ -355,8 +355,9 @@ body.nolines .lnsvg{display:none;}
       <div class="grp">
         <button id="btnOpen2" class="primary" style="justify-content:center;">📂 ファイルを選ぶ</button>
         <button id="btnInbox" style="justify-content:center;">📥 受け皿フォルダを設定</button>
+        <button id="btnBackup" style="justify-content:center;" title="デスク一式（書類・書き込み・フォルダ・線レイヤー）を1つのファイルに保存します">🛟 バックアップ保存</button>
       </div>
-      <div class="hint">PDF・画像（PNG / JPEG）に対応。ここへ、または画面へ<b>ドラッグ＆ドロップ</b>でも取り込めます。<b>1ファイル＝1つの書類（束）</b>としてデスクに並びます。<br>🖨 <b>印刷から直接入れる</b>：受け皿フォルダを設定し、印刷時にプリンタ「<b>Microsoft Print to PDF</b>」で<b>そのフォルダへ保存</b>すると、数秒でデスクに届きます（取り込み後、受け皿からは自動で消えます）。<br>📋 <b>スクショ貼り付け</b>：<b>Win+Shift+S</b> で画面を撮って、この画面で <b>Ctrl+V</b>。そのまま書類になります。</div>
+      <div class="hint">PDF・画像（PNG / JPEG）に対応。ここへ、または画面へ<b>ドラッグ＆ドロップ</b>でも取り込めます。<b>1ファイル＝1つの書類（束）</b>としてデスクに並びます。<br>🖨 <b>印刷から直接入れる</b>：受け皿フォルダを設定し、印刷時にプリンタ「<b>Microsoft Print to PDF</b>」で<b>そのフォルダへ保存</b>すると、数秒でデスクに届きます（取り込み後、受け皿からは自動で消えます）。<br>📋 <b>スクショ貼り付け</b>：<b>Win+Shift+S</b> で画面を撮って、この画面で <b>Ctrl+V</b>。そのまま書類になります。<br>🛟 <b>バックアップ</b>：デスク一式を1つのファイル（.dwpbk）に保存。<b>戻すときはそのファイルをこの画面へドロップ</b>（今のデスクに追加で復元・別PCへの引っ越しにも使えます）。<b>大事な作業のあとは保存を習慣に</b>。</div>
     </div>
 
     <div class="card" id="cardDesk">
@@ -545,7 +546,13 @@ async function handleFiles(fileList){
   let added = 0;
   for(const f of files){
     try{
-      if(/\.json$/i.test(f.name)){ await applyLinesJson(await f.text()); continue; }   // 線レイヤーJSON
+      if(/\.(json|dwpbk)$/i.test(f.name)){                     // バックアップ or 線レイヤーJSON（中身で判定）
+        const text = await f.text();
+        let j=null; try{ j=JSON.parse(text); }catch(_){}
+        if(j && j.type==='dwp-backup'){ await applyBackup(j); }
+        else{ await applyLinesJson(text); }
+        continue;
+      }
       const isPdf = /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name);
       const isImg = /^image\/(png|jpeg)/i.test(f.type) || /\.(png|jpe?g)$/i.test(f.name);
       if(isPdf){ added += await addPdf(f); }
@@ -599,6 +606,85 @@ window.addEventListener('paste', async (e)=>{
     toast('クリップボードから'+n+'枚を書類として取り込みました'+where);
   }
 });
+
+// ==== バックアップ（デスク一式を1ファイルに保存／ドロップで復元） =============
+// ブラウザの保存領域はディスク満杯時などに消えることがあるため、その保険。
+// 復元は「今のデスクへの追加」方式＝既存の書類は消さない（復元操作自体を安全にする）。
+function bytesToB64(u8){
+  let s=''; const CH=0x8000;
+  for(let i=0;i<u8.length;i+=CH){ s+=String.fromCharCode.apply(null, u8.subarray(i, i+CH)); }
+  return btoa(s);
+}
+function b64ToBytes(b64){
+  const s=atob(b64); const u=new Uint8Array(s.length);
+  for(let i=0;i<s.length;i++) u[i]=s.charCodeAt(i);
+  return u;
+}
+async function exportBackup(){
+  if(!bundles.length && !folders.length){ toast('バックアップする書類がありません'); return; }
+  toast('バックアップを作成中…', 15000);
+  try{
+    const used=new Set(); bundles.forEach(b=>b.pages.forEach(p=>used.add(p.docId)));
+    const srcs=[];
+    for(const id of used){
+      const d=docs.get(id); if(!d) continue;
+      const u8 = (d.bytes instanceof Uint8Array) ? d.bytes : new Uint8Array(d.bytes);
+      srcs.push({id:d.id, name:d.name, kind:d.kind, mime:d.mime, b64:bytesToB64(u8)});
+    }
+    const out={ type:'dwp-backup', ver:1, date:new Date().toLocaleString('ja-JP'),
+      sources:srcs,
+      bundles:bundles.map(b=>({bid:b.bid, name:b.name, fid:b.fid||null,
+        pages:b.pages.map(p=>({uid:p.uid, docId:p.docId, pageIndex:p.pageIndex, rotation:p.rotation, annots:p.annots||[], lines:p.lines||null}))})),
+      folders:folders.map(f=>({fid:f.fid, name:f.name})),
+      seq:{uidSeq, docSeq, bidSeq, fidSeq} };
+    const blob=new Blob([JSON.stringify(out)], {type:'application/json'});
+    const d2=new Date(), z=(n)=>String(n).padStart(2,'0');
+    const a=document.createElement('a');
+    a.download='DWPバックアップ_'+d2.getFullYear()+z(d2.getMonth()+1)+z(d2.getDate())+'-'+z(d2.getHours())+z(d2.getMinutes())+'.dwpbk';
+    a.href=URL.createObjectURL(blob);
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 30000);
+    toast('バックアップを保存しました（約'+(Math.round(blob.size/1048576*10)/10)+'MB・ダウンロードフォルダ）');
+  }catch(e){ console.error(e); toast('バックアップの作成に失敗: '+(e.message||e)); }
+}
+async function applyBackup(j){
+  const nb=(j.bundles||[]).length, nf=(j.folders||[]).length;
+  if(!confirm('バックアップ（'+(j.date||'日時不明')+'・'+nb+'書類・'+nf+'フォルダ）を、今のデスクに追加で復元します。よろしいですか？')) return;
+  toast('復元中…', 30000);
+  try{
+    // ID衝突を避けるため、すべてのIDを振り直して取り込む
+    const docMap={}, fidMap={};
+    for(const s of (j.sources||[])){
+      const id='d'+(docSeq++);
+      docMap[s.id]=id;
+      docs.set(id, {id, name:s.name, kind:s.kind, mime:s.mime, bytes:b64ToBytes(s.b64), pdfjsDoc:null});
+      putSourceDb(docs.get(id));
+    }
+    for(const f of (j.folders||[])){
+      const fid=fidSeq++; fidMap[f.fid]=fid;
+      folders.push({fid, name:f.name});
+    }
+    const added=[];
+    for(const b of (j.bundles||[])){
+      const pages=(b.pages||[]).filter(p=>docMap[p.docId]).map(p=>({
+        uid:uidSeq++, docId:docMap[p.docId], pageIndex:p.pageIndex, rotation:p.rotation||0,
+        thumb:null, annots:p.annots||[], lines:p.lines||null }));
+      if(!pages.length) continue;
+      const fid=(b.fid!=null && fidMap[b.fid]!=null) ? fidMap[b.fid] : null;
+      const nbdl={bid:bidSeq++, name:b.name, fid, pages};
+      bundles.push(nbdl); added.push(nbdl);
+    }
+    deskFid=null;
+    renderAll(); persist();
+    toast(added.length+'書類を復元しました。表紙を作成中…', 10000);
+    for(const bb of added){
+      for(const p of bb.pages){ await makeThumb(p); }
+      refreshBundleEl(bb);
+    }
+    persist();
+    toast('復元が完了しました（'+added.length+'書類・'+nf+'フォルダ）');
+  }catch(e){ console.error(e); toast('復元に失敗: '+(e.message||e)); }
+}
 
 function baseName(name){ return String(name).replace(/\.[^.]+$/,''); }
 async function addPdf(file){
@@ -2377,6 +2463,7 @@ $('pvPrev').onclick = ()=>pvStep(-1);
 $('pvNext').onclick = ()=>pvStep(1);
 $('btnCopy').onclick = copySel;
 $('btnExtract').onclick = extractSel;
+$('btnBackup').onclick = exportBackup;
 $('btnNewFolder').onclick = createFolder;
 $('btnUnfold').onclick = unfoldSel;
 $('btnMerge').onclick = mergeSel;
@@ -2562,6 +2649,9 @@ window.addEventListener('DOMContentLoaded', async ()=>{
   initEditorUI();                 // 書き込みツール・色・太さの初期選択
   applyView();                    // まずデスク画面を出す
   await loadFromDb();             // 前回のデスクを復元（使えない環境ではスキップ）
+  // ブラウザに「この保存領域は自動削除しないで」と保護を要求する
+  // （ディスク満杯時にブラウザが保存データを消してデスクが飛んだ事故＝2026-08-03の再発防止）
+  try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(_){}
   renderAll();
   checkReturnHandoff();                                   // モジュールグリッドからの戻りが待っていれば取り込む
   window.addEventListener('focus', checkReturnHandoff);   // タブへ戻ってきた時にも確認
