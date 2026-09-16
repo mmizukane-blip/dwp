@@ -272,6 +272,53 @@ body.nolines .lnsvg{display:none;}
 }
 #edwrap{position:absolute; top:0; left:0; transform-origin:0 0; width:max-content; box-shadow:0 4px 24px rgba(0,0,0,.4); background:#fff; line-height:0;}
 #edcanvas{display:block; touch-action:none; cursor:crosshair;}
+/* ---- 第5弾：変換ダイアログ（JPEG / PNG / DXF） ---- */
+#cvbg{
+  position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:400;
+  display:none; align-items:center; justify-content:center; padding:20px;
+}
+#cvbg.on{display:flex;}
+#cvdlg{
+  background:var(--bg2); border:0.5px solid var(--line); border-radius:var(--rl);
+  box-shadow:0 12px 48px rgba(0,0,0,.4); width:560px; max-width:100%;
+  max-height:100%; overflow:auto; padding:18px 20px;
+}
+#cvdlg h3{font-size:15px; font-weight:700; margin-bottom:4px;}
+#cvtarget{color:var(--text2); font-size:12px; margin-bottom:14px;}
+.cvrow{display:flex; align-items:flex-start; gap:10px; margin-bottom:12px;}
+.cvrow > .cvlbl{width:88px; flex:none; font-size:12.5px; font-weight:700; padding-top:6px;}
+.cvrow > .cvbody{flex:1; min-width:0;}
+.cvseg{display:flex; gap:6px; flex-wrap:wrap;}
+.cvseg button{font-size:12.5px;}
+.cvseg button.active{background:var(--bl); color:#fff; border-color:transparent;}
+#cvdlg select, #cvdlg input[type=number], #cvdlg input[type=text]{
+  font-family:inherit; font-size:13px; color:var(--text); background:var(--bg2);
+  border:0.5px solid var(--line); border-radius:var(--r); padding:5px 8px;
+}
+#cvdlg input[type=number]{width:96px;}
+.cvchk{display:flex; align-items:center; gap:6px; font-size:12.5px; cursor:pointer; margin:4px 0;}
+.cvchk input{accent-color:var(--bl); cursor:pointer;}
+.cvnote{color:var(--text3); font-size:11.5px; line-height:1.55; margin-top:5px;}
+.cvwarn{color:var(--am); font-size:11.5px; line-height:1.55; margin-top:5px;}
+.cvsec{border-top:0.5px solid var(--line); margin:14px 0 12px; padding-top:12px;}
+.cvsec.hide{display:none;}
+#cvfoot{display:flex; align-items:center; gap:8px; border-top:0.5px solid var(--line); padding-top:13px; margin-top:4px;}
+#cvstat{flex:1; color:var(--text2); font-size:12px; min-width:0;}
+#cvreport{
+  background:var(--bg3); border-radius:var(--r); padding:9px 11px; margin-top:10px;
+  font-size:11.5px; line-height:1.7; color:var(--text2); display:none; white-space:pre-wrap;
+}
+#cvreport.on{display:block;}
+/* 2点校正の画面（DXFの実寸合わせ） */
+#cvcal{position:fixed; inset:0; background:rgba(0,0,0,.82); z-index:420; display:none; flex-direction:column;}
+#cvcal.on{display:flex;}
+#cvcalbar{
+  display:flex; align-items:center; gap:10px; padding:8px 14px; flex:none;
+  background:var(--bg2); border-bottom:0.5px solid var(--line); font-size:12.5px;
+}
+#cvcalmsg{color:var(--text2);}
+#cvcalstage{flex:1; overflow:auto; display:flex; align-items:flex-start; justify-content:center; padding:12px;}
+#cvcalcv{background:#fff; cursor:crosshair; box-shadow:0 4px 24px rgba(0,0,0,.4); max-width:none;}
 </style>
 </head>
 <body>
@@ -284,6 +331,7 @@ body.nolines .lnsvg{display:none;}
     <button id="btnExportAll">💾 すべて書き出し</button>
     <button id="btnExportSel">✂ 選択を書き出し</button>
     <button id="btnPrint">🖨 印刷</button>
+    <button id="btnConvert" title="画像（JPEG/PNG）やDXFに変換して保存します">🔄 変換</button>
     <button id="btnLines" title="検出した線レイヤーの表示ON/OFF（tools\make_lines.py が作る .lines.json を取り込むと使えます）">📏 線:ON</button>
     <div class="sep"></div>
     <button id="btnClear" class="warn">🗑 全消去</button>
@@ -451,6 +499,124 @@ body.nolines .lnsvg{display:none;}
 <div id="drophint">ここにドロップして取り込み</div>
 <div id="toast"></div>
 
+<!-- 第5弾：変換ダイアログ。画像（JPEG/PNG）とDXFへの書き出しをここでまとめて指定する -->
+<div id="cvbg">
+  <div id="cvdlg">
+    <h3>🔄 変換して保存</h3>
+    <div id="cvtarget">対象を確認中…</div>
+
+    <div class="cvrow">
+      <div class="cvlbl">形式</div>
+      <div class="cvbody">
+        <div class="cvseg" id="cvFmt">
+          <button data-fmt="jpeg" class="active">🖼 JPEG</button>
+          <button data-fmt="png">🖼 PNG</button>
+          <button data-fmt="dxf">📐 DXF</button>
+        </div>
+        <div class="cvnote" id="cvFmtNote"></div>
+      </div>
+    </div>
+
+    <!-- 画像（JPEG/PNG）のときの設定 -->
+    <div id="cvImgOpt">
+      <div class="cvrow">
+        <div class="cvlbl">解像度</div>
+        <div class="cvbody">
+          <select id="cvDpi">
+            <option value="150">150 dpi（軽い・確認用）</option>
+            <option value="200">200 dpi</option>
+            <option value="300" selected>300 dpi（推奨・印刷品質）</option>
+            <option value="400">400 dpi</option>
+            <option value="600">600 dpi（重い・細部まで）</option>
+          </select>
+          <div class="cvnote" id="cvDpiNote"></div>
+        </div>
+      </div>
+      <div class="cvrow" id="cvQualRow">
+        <div class="cvlbl">画質</div>
+        <div class="cvbody">
+          <select id="cvQual">
+            <option value="0.75">標準（ファイル小）</option>
+            <option value="0.88" selected>高い（推奨）</option>
+            <option value="0.96">最高（ファイル大）</option>
+          </select>
+          <div class="cvnote">JPEGは圧縮で細い線がにじみます。線を大事にするならPNGを選んでください。</div>
+        </div>
+      </div>
+      <div class="cvrow">
+        <div class="cvlbl">含めるもの</div>
+        <div class="cvbody">
+          <label class="cvchk"><input type="checkbox" id="cvAnnots" checked>書き込み（ペン・付箋・ハンコ）も一緒に描く</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- DXFのときの設定 -->
+    <div id="cvDxfOpt" class="cvsec hide">
+      <div class="cvrow">
+        <div class="cvlbl">実寸の決め方</div>
+        <div class="cvbody">
+          <div class="cvseg" id="cvScaleMode">
+            <button data-sm="denom" class="active">縮尺を入力</button>
+            <button data-sm="calib">2点で測って合わせる</button>
+            <button data-sm="paper">用紙の原寸（1/1）</button>
+          </div>
+          <div class="cvbody" id="cvDenomBox" style="margin-top:8px;">
+            1 / <input type="number" id="cvDenom" value="100" min="1" max="10000" step="1"> の図面として出す
+          </div>
+          <div class="cvwarn" id="cvScaleNote">PDFに「この図面は1/100」という情報は入っていません。上の指定を信じて換算します。印刷時に「用紙に合わせる」で縮小されたPDFでは寸法が合いません。</div>
+        </div>
+      </div>
+      <div class="cvrow">
+        <div class="cvlbl">出すもの</div>
+        <div class="cvbody">
+          <label class="cvchk"><input type="checkbox" id="cvDxfText" checked>文字を TEXT として出す</label>
+          <label class="cvchk"><input type="checkbox" id="cvDxfCurve" checked>曲線・円弧を細かい線に分けて出す</label>
+          <label class="cvchk"><input type="checkbox" id="cvDxfFill">塗りつぶしの輪郭も線として出す</label>
+          <div class="cvnote">許容誤差 <input type="number" id="cvTol" value="0.2" min="0.02" max="5" step="0.02"> mm（曲線を線に分けるときの粗さ）</div>
+        </div>
+      </div>
+      <div class="cvrow">
+        <div class="cvlbl">文字コード</div>
+        <div class="cvbody">
+          <div class="cvseg" id="cvEnc">
+            <button data-enc="utf8" class="active">UTF-8（今のCAD向け）</button>
+            <button data-enc="esc">\U+ 変換（古いCAD向け）</button>
+          </div>
+          <div class="cvnote">開けない・文字化けするときは、もう一方で出し直してください。</div>
+        </div>
+      </div>
+      <div class="cvwarn">⚠ これは「PDFの見た目の線をDXFに写す」機能です。元のCADデータの復元ではありません。線幅・線種・色・レイヤーは失われ、すべて1つのレイヤーに入ります。</div>
+      <div class="cvnote" style="margin-top:9px; border-top:0.5px solid var(--line); padding-top:9px;">
+        📐 <b>Jw_cadの図面（.jww）をDXFにしたいとき</b>は、このアプリではなく <b>Jw_cad本体</b>をお使いください。そのほうが確実です。<br>
+        　・1ファイルだけ：Jw_cadで開いて <b>ファイル → DXF形式で保存</b><br>
+        　・まとめて何枚も：<b>ファイル → ファイル操作 → ファイル一括変換</b><br>
+        Jw_cad自身が変換するので、線も文字も正しく出ます（DWPのPDF変換のような欠落がありません）。
+      </div>
+    </div>
+
+    <div id="cvreport"></div>
+
+    <div id="cvfoot">
+      <span id="cvstat"></span>
+      <button id="cvRun" class="primary">変換して保存</button>
+      <button id="cvClose">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- DXFの「2点で測って合わせる」ときの校正画面 -->
+<div id="cvcal">
+  <div id="cvcalbar">
+    <b>2点で測って合わせる</b>
+    <span id="cvcalmsg">図面上で、実寸の分かっている2点をクリックしてください（例：通り芯の間）</span>
+    <span style="flex:1"></span>
+    <button id="cvcalUndo">やり直す</button>
+    <button id="cvcalCancel">中止</button>
+  </div>
+  <div id="cvcalstage"><canvas id="cvcalcv"></canvas></div>
+</div>
+
 <!-- 書き込みモードの編集面。ON中だけ表示され、下の画面を覆ってロックする -->
 <div id="editor">
   <div id="edstage">
@@ -581,6 +747,7 @@ async function blobToPngFile(blob, name){
 }
 window.addEventListener('paste', async (e)=>{
   if($('editor').classList.contains('on')) return;                                   // 書き込み中は対象外
+  if($('cvbg').classList.contains('on') || $('cvcal').classList.contains('on')) return;   // 変換・校正の最中も対象外
   if(e.target && e.target.closest && e.target.closest('input,textarea')) return;     // 入力欄への貼り付けは邪魔しない
   const items = (e.clipboardData && e.clipboardData.items) ? Array.from(e.clipboardData.items) : [];
   const imgs = items.filter(it=>it.kind==='file' && /^image\//i.test(it.type));
@@ -1229,6 +1396,492 @@ async function printPdf(){
     else { toast('ポップアップがブロックされました。ブラウザで許可してください'); }
     setTimeout(()=>URL.revokeObjectURL(url), 60000);
   }catch(e){ console.error(e); alert('印刷準備に失敗しました: '+e.message); }
+}
+
+// ==== 第5弾：変換（JPEG / PNG / DXF） ========================================
+// 変換の対象は「デスクで選んだ書類」または「開いている書類の（選んだ）ページ」。
+// 画像は1ページ＝1ファイルで保存する。ブラウザだけで完結し、通信はしない。
+let cvFmt='jpeg';          // 'jpeg' | 'png' | 'dxf'
+let cvScaleMode='denom';   // 'denom'（縮尺を入力）| 'calib'（2点校正）| 'paper'（用紙原寸）
+let cvEnc='utf8';          // 'utf8' | 'esc'
+let cvBusy=false;
+let cvAbort=false;         // 変換中に「中止」が押されたか
+let cvCalib=null;          // 2点校正の結果 {mmPerPt, pageUid}
+
+// キャンバスの安全上限。これを超えるとブラウザが黙って描画に失敗するため、自動で落とす。
+const CV_MAX_SIDE = 16000;
+const CV_MAX_AREA = 120000000;   // 約1.2億px（A3・600dpiの約7000万pxには余裕がある）
+
+// いま変換できる対象を集める
+function convTarget(){
+  if(view==='desk'){
+    const sel = deskSelected();
+    const list = sel.length ? sel : (bundles.length===1 ? bundles.slice() : []);
+    if(!list.length) return {pages:[], name:'', why:'デスクで書類を選んでから「🔄 変換」を押してください。'};
+    const pgs = list.flatMap(b=>b.pages);
+    const name = (list.length===1) ? sanitize(list[0].name) : 'DWP_'+tstamp();
+    return {pages:pgs, name, label:(list.length===1 ? list[0].name : list.length+'冊の書類')};
+  }
+  const b = curBundle();
+  const sel = selectedPagesInOrder();
+  const pgs = sel.length ? sel : pages;
+  if(!pgs.length) return {pages:[], name:'', why:'変換するページがありません。'};
+  const name = b ? sanitize(b.name) : 'DWP_'+tstamp();
+  return {pages:pgs, name, label:(b?b.name:'書類') + (sel.length ? '（選んだ'+sel.length+'ページ）' : '')};
+}
+
+function openConvert(){
+  const t = convTarget();
+  if(!t.pages.length){ toast(t.why || '変換する対象がありません'); return; }
+  cvCalib = null;
+  $('cvtarget').textContent = '対象：' + t.label + '　／　' + t.pages.length + 'ページ';
+  $('cvreport').classList.remove('on');
+  $('cvstat').textContent = '';
+  cvUpdateNote();
+  $('cvbg').classList.add('on');
+}
+function closeConvert(){ if(cvBusy) return; $('cvbg').classList.remove('on'); }
+
+function cvSetFmt(f){
+  cvFmt = f;
+  document.querySelectorAll('#cvFmt button').forEach(b=>b.classList.toggle('active', b.dataset.fmt===f));
+  $('cvImgOpt').style.display = (f==='dxf') ? 'none' : '';
+  $('cvDxfOpt').classList.toggle('hide', f!=='dxf');
+  $('cvQualRow').style.display = (f==='jpeg') ? '' : 'none';
+  cvUpdateNote();
+}
+// 解像度を選んだときに「実際に何ピクセルになるか」を先に見せる（重さの目安）
+async function cvUpdateNote(){
+  const note = $('cvFmtNote');
+  note.textContent = (cvFmt==='dxf')
+    ? 'CADで開ける線データ（ASCII DXF）にします。線を持たないスキャン図面からは線を取り出せません。'
+    : (cvFmt==='png' ? '線がにじまない形式です。ファイルは大きめになります。' : '写真向けの形式で、ファイルが小さく済みます。');
+  if(cvFmt==='dxf'){ $('cvDpiNote').textContent=''; return; }
+  const t = convTarget(); const p = t.pages[0];
+  if(!p){ $('cvDpiNote').textContent=''; return; }
+  const dpi = parseInt($('cvDpi').value,10);
+  try{
+    const sz = await pagePtSize(p);
+    const longPt = Math.max(sz.w, sz.h);
+    const fit = cvFitLongEdge(longPt/72*dpi, Math.min(sz.w,sz.h)/Math.max(sz.w,sz.h));
+    const shortPx = Math.round(fit*Math.min(sz.w,sz.h)/longPt);
+    const mmW = (sz.w*25.4/72).toFixed(0), mmH = (sz.h*25.4/72).toFixed(0);
+    $('cvDpiNote').textContent =
+      '1ページ目：約'+mmW+'×'+mmH+'mm → '+Math.round(fit)+'×'+shortPx+'ピクセル'
+      + (fit < longPt/72*dpi-1 ? '（大きすぎるため上限まで下げました）' : '');
+  }catch(e){ $('cvDpiNote').textContent=''; }
+}
+// 上限を超えないように長辺ピクセルを丸める
+function cvFitLongEdge(longPx, ratio){
+  let L = Math.max(1, longPx);
+  if(L > CV_MAX_SIDE) L = CV_MAX_SIDE;
+  if(L*L*ratio > CV_MAX_AREA) L = Math.sqrt(CV_MAX_AREA/ratio);
+  return Math.floor(L);
+}
+// ページの紙の大きさ（pt単位・回転を反映）。画像ページは96dpiの紙として扱う。
+async function pagePtSize(p){
+  const doc = docs.get(p.docId);
+  if(doc.kind==='pdf'){
+    const page = await (await pdfjsOf(doc)).getPage(p.pageIndex+1);
+    const vp = page.getViewport({scale:1, rotation:p.rotation});
+    return {w:vp.width, h:vp.height, isPdf:true};
+  }
+  const cv = await renderPageCanvas(p, 4000);       // 画像は原寸が分からないので、まず実寸比だけ得る
+  const w = cv.width*72/96, h = cv.height*72/96;
+  cv.width=0; cv.height=0;
+  return {w, h, isPdf:false};
+}
+
+// --- 実行 ---
+async function runConvert(){
+  if(cvBusy) return;
+  const t = convTarget();
+  if(!t.pages.length){ toast(t.why||'対象がありません'); return; }
+  // 大きな図面は1ページに数秒〜十数秒かかる。途中でやめられるように、ボタンを「中止」に変える。
+  cvBusy = true; cvAbort = false;
+  $('cvRun').textContent = '⏹ 中止'; $('cvRun').classList.remove('primary');
+  $('cvClose').disabled = true;
+  $('cvreport').classList.remove('on');
+  try{
+    if(cvFmt==='dxf') await exportDxf(t);
+    else await exportImages(t);
+  }catch(e){
+    console.error(e);
+    $('cvstat').textContent = '';
+    alert('変換に失敗しました: ' + (e.message||e));
+  }finally{
+    cvBusy = false;
+    $('cvRun').textContent = '変換して保存'; $('cvRun').classList.add('primary');
+    $('cvClose').disabled = false;
+  }
+}
+
+// --- 画像（JPEG / PNG）への変換 ---
+async function exportImages(t){
+  const dpi  = parseInt($('cvDpi').value,10);
+  const qual = parseFloat($('cvQual').value);
+  const withAnnots = $('cvAnnots').checked;
+  const mime = (cvFmt==='png') ? 'image/png' : 'image/jpeg';
+  const ext  = (cvFmt==='png') ? 'png' : 'jpg';
+  const many = t.pages.length > 1;
+  let done=0, shrunk=0, totalBytes=0;
+
+  for(let i=0;i<t.pages.length;i++){
+    if(cvAbort) break;
+    const p = t.pages[i];
+    $('cvstat').textContent = '変換中… ' + (i+1) + ' / ' + t.pages.length + 'ページ';
+    await new Promise(r=>setTimeout(r,0));          // 画面の表示を更新させてから重い処理に入る
+
+    const sz = await pagePtSize(p);
+    const longPt = Math.max(sz.w, sz.h);
+    const want = sz.isPdf ? (longPt/72*dpi) : (longPt/72*Math.max(dpi,96));
+    const longEdge = cvFitLongEdge(want, Math.min(sz.w,sz.h)/longPt);
+    if(longEdge < want-1) shrunk++;
+
+    const cv = await renderPageCanvas(p, longEdge);
+    if(withAnnots && p.annots && p.annots.length) drawAnnots(cv.getContext('2d'), p.annots, cv.width, cv.height);
+    // JPEGは透明を扱えない。PNG画像などをそのままJPEGにすると黒く沈むため、白を敷く。
+    if(mime==='image/jpeg'){
+      const ctx = cv.getContext('2d');
+      ctx.globalCompositeOperation='destination-over';
+      ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height);
+      ctx.globalCompositeOperation='source-over';
+    }
+    const blob = await new Promise(res=>cv.toBlob(res, mime, qual));
+    cv.width=0; cv.height=0;                        // 1ページごとにメモリを手放す（600dpiでは数百MBになる）
+    if(!blob) throw new Error('画像を作れませんでした（解像度を下げてお試しください）');
+    totalBytes += blob.size;
+
+    const num = many ? ('_P'+String(i+1).padStart(2,'0')) : '';
+    downloadBlob(blob, t.name + num + '.' + ext);
+    done++;
+    if(i < t.pages.length-1) await new Promise(r=>setTimeout(r, 260));   // 連続保存がブロックされないよう間を空ける
+  }
+
+  const mb = (totalBytes/1048576).toFixed(1);
+  let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ') + done + '個の画像を保存しました（合計 約' + mb + 'MB）\n'
+          + '　形式：' + (cvFmt==='png'?'PNG':'JPEG（画質'+Math.round(qual*100)+'%）') + '　解像度：' + dpi + 'dpi';
+  if(shrunk) rep += '\n⚠ ' + shrunk + 'ページは大きすぎたため、上限まで解像度を下げました。';
+  if(many)   rep += '\n※ ブラウザが「複数のファイルのダウンロード」を尋ねたときは「許可」を選んでください。';
+  $('cvreport').textContent = rep; $('cvreport').classList.add('on');
+  $('cvstat').textContent = '';
+  toast(done + '個の画像を保存しました');
+}
+
+// --- PDFのページから、DXFに出す線と文字を取り出す ---
+// 吸着用の extractPageSnap とは別の経路にしている。あちらは画面座標を0〜1に正規化するため
+// 絶対寸法が消えており、DXFには使えない。こちらは PDFユーザー空間(pt) のまま最後まで持つ。
+async function extractVectors(page, rotation, opt){
+  const OPS = pdfjsLib.OPS;
+  const ol = await page.getOperatorList({intent:'display', annotationMode:0});  // 後から足した注釈は本文でないので除く
+  const view = page.view;                              // CropBox [x0,y0,x1,y1]
+  const vw = view[2]-view[0], vh = view[3]-view[1];
+  const r = ((rotation%360)+360)%360;
+  const st = {curve:0, fillPath:0, clip:0, image:0, textPath:0, shading:0, cut:false};
+
+  // CropBox基準へ寄せ、DWPで回した向きに合わせる（DXFもPDFもY上向きなので反転は不要）
+  const toPage = (x,y)=>{
+    const px = x - view[0], py = y - view[1];
+    if(r===90)  return [py, vw-px];
+    if(r===180) return [vw-px, vh-py];
+    if(r===270) return [vh-py, px];
+    return [px, py];
+  };
+  const mul = (m,a)=>[m[0]*a[0]+m[2]*a[1], m[1]*a[0]+m[3]*a[1], m[0]*a[2]+m[2]*a[3], m[1]*a[2]+m[3]*a[3], m[0]*a[4]+m[2]*a[5]+m[4], m[1]*a[4]+m[3]*a[5]+m[5]];
+  const ap  = (m,x,y)=>[m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];
+
+  let ctm=[1,0,0,1,0,0]; const stack=[];
+  const segs=[]; const MAX=400000;
+  let inText=0;             // テキストの中（Type3フォントの字形を線として拾わないための目印）
+  let buf=[];               // 組み立て中のパス（塗りか線かは、後から来る命令で決まる）
+
+  // 3次ベジエを、許容誤差におさまる本数の直線に分ける
+  const tolPt = Math.max(opt.tolPt||0.5, 0.001);
+  const bez=(p0,p1,p2,p3,out)=>{
+    const d1=Math.hypot(p0[0]-2*p1[0]+p2[0], p0[1]-2*p1[1]+p2[1]);
+    const d2=Math.hypot(p1[0]-2*p2[0]+p3[0], p1[1]-2*p2[1]+p3[1]);
+    let n=Math.ceil(Math.sqrt(0.75*Math.max(d1,d2)/tolPt));
+    n=Math.max(1, Math.min(64, n||1));
+    let prev=p0;
+    for(let k=1;k<=n;k++){
+      const s=k/n, u=1-s;
+      const x=u*u*u*p0[0] + 3*u*u*s*p1[0] + 3*u*s*s*p2[0] + s*s*s*p3[0];
+      const y=u*u*u*p0[1] + 3*u*u*s*p1[1] + 3*u*s*s*p2[1] + s*s*s*p3[1];
+      out.push([prev[0],prev[1],x,y]); prev=[x,y];
+    }
+  };
+  const flush=(keep)=>{                                  // keep=true なら採用、false なら捨てる
+    if(keep){ for(const s of buf){ if(segs.length<MAX) segs.push(s); } }
+    buf=[];
+  };
+
+  for(let i=0;i<ol.fnArray.length;i++){
+    if(segs.length>=MAX){ st.cut=true; break; }
+    const fn=ol.fnArray[i], a=ol.argsArray[i];
+    if(fn===OPS.save){ stack.push(ctm); continue; }
+    if(fn===OPS.restore){ ctm=stack.pop()||[1,0,0,1,0,0]; continue; }
+    if(fn===OPS.transform){ ctm=mul(ctm,a); continue; }
+    // 図形の中に埋め込まれた小図形（Form XObject）は、自前の変換行列を持つので追従する
+    if(fn===OPS.paintFormXObjectBegin){ stack.push(ctm); if(Array.isArray(a[0])&&a[0].length===6) ctm=mul(ctm,a[0]); continue; }
+    if(fn===OPS.paintFormXObjectEnd){ ctm=stack.pop()||[1,0,0,1,0,0]; continue; }
+    if(fn===OPS.beginText){ inText++; continue; }
+    if(fn===OPS.endText){ inText=Math.max(0,inText-1); continue; }
+    if(fn===OPS.paintImageXObject || fn===OPS.paintInlineImageXObject || fn===OPS.paintImageMaskXObject){ st.image++; continue; }
+    if(fn===OPS.shadingFill){ st.shading++; continue; }
+
+    if(fn===OPS.constructPath){
+      const ops=a[0], co=a[1]; let ci=0, cx=0, cy=0, sx=0, sy=0;
+      const P=(x,y)=>{ const u=ap(ctm,x,y); return toPage(u[0],u[1]); };
+      for(const op of ops){
+        if(op===OPS.moveTo){ cx=co[ci++]; cy=co[ci++]; sx=cx; sy=cy; }
+        else if(op===OPS.lineTo){ const nx=co[ci++], ny=co[ci++]; const A=P(cx,cy), B=P(nx,ny); buf.push([A[0],A[1],B[0],B[1]]); cx=nx; cy=ny; }
+        else if(op===OPS.curveTo || op===OPS.curveTo2 || op===OPS.curveTo3){
+          let x1,y1,x2,y2,x3,y3;
+          if(op===OPS.curveTo){ x1=co[ci++]; y1=co[ci++]; x2=co[ci++]; y2=co[ci++]; x3=co[ci++]; y3=co[ci++]; }
+          else if(op===OPS.curveTo2){ x1=cx; y1=cy; x2=co[ci++]; y2=co[ci++]; x3=co[ci++]; y3=co[ci++]; }
+          else { x1=co[ci++]; y1=co[ci++]; x3=co[ci++]; y3=co[ci++]; x2=x3; y2=y3; }
+          st.curve++;
+          if(opt.curve) bez(P(cx,cy), P(x1,y1), P(x2,y2), P(x3,y3), buf);
+          else { const A=P(cx,cy), B=P(x3,y3); buf.push([A[0],A[1],B[0],B[1]]); }   // 分割しない指定なら弦で近似
+          cx=x3; cy=y3;
+        }
+        else if(op===OPS.closePath){ const A=P(cx,cy), B=P(sx,sy); buf.push([A[0],A[1],B[0],B[1]]); cx=sx; cy=sy; }
+        else if(op===OPS.rectangle){
+          const x=co[ci++], y=co[ci++], w=co[ci++], h=co[ci++];
+          const c1=P(x,y), c2=P(x+w,y), c3=P(x+w,y+h), c4=P(x,y+h);
+          buf.push([c1[0],c1[1],c2[0],c2[1]],[c2[0],c2[1],c3[0],c3[1]],[c3[0],c3[1],c4[0],c4[1]],[c4[0],c4[1],c1[0],c1[1]]);
+          cx=x; cy=y; sx=x; sy=y;
+        }
+      }
+      continue;
+    }
+    // パスの意味は、後ろに来るこの命令で決まる。線として描かれたものだけを採るのが基本。
+    if(fn===OPS.stroke || fn===OPS.closeStroke){ if(inText>0){ st.textPath++; flush(false); } else flush(true); continue; }
+    if(fn===OPS.fill || fn===OPS.eoFill){
+      if(inText>0){ st.textPath++; flush(false); }                 // 文字の字形（Type3など）は線にしない
+      else { st.fillPath++; flush(!!opt.fill); }
+      continue;
+    }
+    if(fn===OPS.fillStroke || fn===OPS.eoFillStroke || fn===OPS.closeFillStroke || fn===OPS.closeEOFillStroke){
+      if(inText>0){ st.textPath++; flush(false); } else flush(true); continue;
+    }
+    if(fn===OPS.clip || fn===OPS.eoClip){ st.clip++; continue; }   // 切り抜き枠は図形ではないので出さない
+    if(fn===OPS.endPath){ flush(false); continue; }                // 描かれずに終わったパスは捨てる
+  }
+  flush(false);
+
+  // --- 文字 ---
+  const texts=[]; const tst={vertical:0, skew:0, wide:0};
+  if(opt.text){
+    try{
+      const tc = await page.getTextContent();
+      for(const it of tc.items){
+        if(!it.str || !it.str.trim()) continue;
+        const tr = it.transform;
+        const hx = Math.hypot(tr[0], tr[1]);        // 横方向の伸び
+        const hy = Math.hypot(tr[2], tr[3]);        // 文字の高さ
+        if(!(hy>0)) continue;
+        const ins = toPage(tr[4], tr[5]);           // 挿入点＝ベースラインの左端
+        let ang = Math.atan2(tr[1], tr[0]) * 180/Math.PI - r;
+        ang = ((ang%360)+360)%360;
+        if(it.dir === 'ttb') tst.vertical++;
+        if(Math.abs(tr[0]*tr[2] + tr[1]*tr[3]) > 0.02*hx*hy) tst.skew++;   // 斜体・ゆがみ
+        // 横の伸び（幅係数）。スキャンPDFに埋まったOCR文字は極端に引き伸ばされていることがあり、
+        // そのまま出すとCADで文字が壊れて見えるため、常識的な範囲を外れたら等倍に戻す。
+        let wf = (hx>0) ? hx/hy : 1;
+        if(!(wf>0.25 && wf<4)){ tst.wide++; wf = 1; }
+        texts.push({x:ins[0], y:ins[1], h:hy, ang, wf, s:it.str});
+      }
+    }catch(e){ console.error(e); }
+  }
+  return {segs, texts, st, tst, pageW:(r===90||r===270)?vh:vw, pageH:(r===90||r===270)?vw:vh};
+}
+
+// --- 取り出した線と文字を、CADが読めるASCII DXFの文字列に組み立てる ---
+// 相手先から実際に届くDXFに合わせ、LINEとTEXTだけの素直な形にする。
+function buildDxf(v, mmPerPt, encMode){
+  const out=[];
+  const g=(code, val)=>{ out.push(String(code).padStart(3,' ')); out.push(String(val)); };
+  const n=(x)=>x.toFixed(3);
+  // DXFでは「\」が制御文字の始まりなので必ず二重にする。旧CAD向けは非ASCIIを \U+XXXX に置き換える。
+  const enc=(s)=>{
+    let t = String(s).replace(/\r|\n/g,' ').replace(/\\/g,'\\\\');
+    if(encMode!=='utf8') t = t.replace(/[^\x20-\x7E]/g, ch=>'\\U+'+ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0'));
+    return t;
+  };
+  const X=(x)=>x*mmPerPt, Y=(y)=>y*mmPerPt;
+
+  let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
+  for(const s of v.segs){
+    x0=Math.min(x0,s[0],s[2]); x1=Math.max(x1,s[0],s[2]);
+    y0=Math.min(y0,s[1],s[3]); y1=Math.max(y1,s[1],s[3]);
+  }
+  for(const t of v.texts){ x0=Math.min(x0,t.x); x1=Math.max(x1,t.x); y0=Math.min(y0,t.y); y1=Math.max(y1,t.y); }
+  if(!isFinite(x0)){ x0=0; y0=0; x1=v.pageW; y1=v.pageH; }
+
+  g(0,'SECTION'); g(2,'HEADER');
+  if(encMode==='utf8'){ g(9,'$ACADVER'); g(1,'AC1021'); }      // 2007形式＝UTF-8で書いてよい版
+  g(9,'$INSUNITS'); g(70,'     4');                            // 4 = ミリメートル
+  g(9,'$EXTMIN'); g(10,n(X(x0))); g(20,n(Y(y0))); g(30,'0.0');
+  g(9,'$EXTMAX'); g(10,n(X(x1))); g(20,n(Y(y1))); g(30,'0.0');
+  g(0,'ENDSEC');
+
+  // 受け側CADが厳しくても読めるように、線種・レイヤー・文字スタイルの定義を入れておく
+  g(0,'SECTION'); g(2,'TABLES');
+  g(0,'TABLE'); g(2,'LTYPE'); g(70,'     1');
+  g(0,'LTYPE'); g(2,'CONTINUOUS'); g(70,'     0'); g(3,'Solid line'); g(72,'    65'); g(73,'     0'); g(40,'0.0');
+  g(0,'ENDTAB');
+  g(0,'TABLE'); g(2,'LAYER'); g(70,'     2');
+  g(0,'LAYER'); g(2,'0');    g(70,'     0'); g(62,'     7'); g(6,'CONTINUOUS');
+  g(0,'LAYER'); g(2,'TEXT'); g(70,'     0'); g(62,'     3'); g(6,'CONTINUOUS');
+  g(0,'ENDTAB');
+  g(0,'TABLE'); g(2,'STYLE'); g(70,'     1');
+  g(0,'STYLE'); g(2,'STANDARD'); g(70,'     0'); g(40,'0.0'); g(41,'1.0'); g(50,'0.0'); g(71,'     0'); g(42,'2.5'); g(3,'txt'); g(4,'');
+  g(0,'ENDTAB');
+  g(0,'ENDSEC');
+
+  g(0,'SECTION'); g(2,'ENTITIES');
+  for(const s of v.segs){
+    if(s[0]===s[2] && s[1]===s[3]) continue;                   // 長さゼロの線はCADで邪魔になるので捨てる
+    g(0,'LINE'); g(8,'0'); g(6,'CONTINUOUS');
+    g(10,n(X(s[0]))); g(20,n(Y(s[1]))); g(30,'0.0');
+    g(11,n(X(s[2]))); g(21,n(Y(s[3]))); g(31,'0.0');
+  }
+  for(const t of v.texts){
+    const h=Y(t.h); if(!(h>0)) continue;
+    g(0,'TEXT'); g(8,'TEXT'); g(7,'STANDARD');
+    g(10,n(X(t.x))); g(20,n(Y(t.y))); g(30,'0.0');
+    g(40,n(h)); g(1,enc(t.s));
+    if(Math.abs(t.ang)>0.001) g(50,t.ang.toFixed(3));
+    if(Math.abs(t.wf-1)>0.01)  g(41,t.wf.toFixed(3));
+  }
+  g(0,'ENDSEC'); g(0,'EOF');
+  return out.join('\r\n') + '\r\n';
+}
+
+// --- DXFへの変換（本体） ---
+async function exportDxf(t){
+  const opt = {
+    text:  $('cvDxfText').checked,
+    curve: $('cvDxfCurve').checked,
+    fill:  $('cvDxfFill').checked,
+    tol:   Math.max(0.02, parseFloat($('cvTol').value)||0.2),
+  };
+  // 1ptあたり何mmか。PDFは1pt=1/72インチなので、紙の上では 25.4/72 mm。
+  let mmPerPt = 25.4/72;
+  if(cvScaleMode==='denom') mmPerPt *= Math.max(1, parseFloat($('cvDenom').value)||100);
+
+  const pdfPages = t.pages.filter(p=>docs.get(p.docId).kind==='pdf');
+  const skipped  = t.pages.length - pdfPages.length;
+  if(!pdfPages.length){ alert('DXFにできるのはPDFのページだけです。画像（スキャン）からは線データを取り出せません。'); return; }
+
+  if(cvScaleMode==='calib'){
+    $('cvbg').classList.remove('on');
+    const r = await cvCalibrate(pdfPages[0]);
+    $('cvbg').classList.add('on');
+    if(!r){ $('cvstat').textContent='中止しました'; return; }
+    mmPerPt = r;
+  }
+  opt.tolPt = opt.tol / mmPerPt;                                // 許容誤差(mm)をPDFの単位に直す
+
+  const many = pdfPages.length>1;
+  let done=0, nSeg=0, nText=0;
+  const sum={curve:0, fillPath:0, clip:0, image:0, textPath:0, shading:0, cut:false, vertical:0, skew:0, wide:0, empty:0, textOnly:0};
+
+  for(let i=0;i<pdfPages.length;i++){
+    if(cvAbort) break;
+    const p = pdfPages[i];
+    $('cvstat').textContent = '線を取り出しています… ' + (i+1) + ' / ' + pdfPages.length + 'ページ';
+    await new Promise(r=>setTimeout(r,0));
+    const doc = docs.get(p.docId);
+    const page = await (await pdfjsOf(doc)).getPage(p.pageIndex+1);
+    const v = await extractVectors(page, p.rotation, opt);
+    nSeg += v.segs.length; nText += v.texts.length;
+    for(const k of ['curve','fillPath','clip','image','textPath','shading']) sum[k]+=v.st[k];
+    if(v.st.cut) sum.cut=true;
+    sum.vertical+=v.tst.vertical; sum.skew+=v.tst.skew; sum.wide+=v.tst.wide;
+    if(!v.segs.length && !v.texts.length) sum.empty++;
+    else if(!v.segs.length && v.texts.length) sum.textOnly++;      // 線が無く文字だけ＝スキャン＋OCR文字のPDF
+
+    const txt = buildDxf(v, mmPerPt, cvEnc);
+    const blob = new Blob([txt], {type:'application/dxf'});     // 文字列を渡すとUTF-8で書き出される
+    const num = many ? ('_P'+String(i+1).padStart(2,'0')) : '';
+    downloadBlob(blob, t.name + num + '.dxf');
+    done++;
+    if(i<pdfPages.length-1) await new Promise(r=>setTimeout(r,260));
+  }
+
+  const scaleTxt = (cvScaleMode==='calib') ? ('2点校正（1pt = '+mmPerPt.toFixed(4)+'mm）')
+                 : (cvScaleMode==='paper') ? '用紙の原寸（1/1）'
+                 : ('1/'+(parseFloat($('cvDenom').value)||100)+' として換算');
+  let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ')+done+'個のDXFを保存しました\n'
+          + '　線（LINE）：'+nSeg.toLocaleString()+'本　文字（TEXT）：'+nText.toLocaleString()+'個\n'
+          + '　実寸の決め方：'+scaleTxt+'　単位：mm　文字コード：'+(cvEnc==='utf8'?'UTF-8':'\\U+変換')+'\n';
+  const w=[];
+  if(sum.empty)    w.push('・'+sum.empty+'ページは線が1本も取れませんでした（スキャン画像のPDFと思われます）');
+  if(sum.textOnly) w.push('⚠ '+sum.textOnly+'ページは線が取れず、文字だけになりました。スキャン図面に文字読み取り（OCR）の結果が埋まっているPDFです。図形は入っていません');
+  if(sum.wide)     w.push('・横に極端に伸びた文字 '+sum.wide+'個は、幅を等倍に戻しました（OCR文字によくある形です）');
+  if(sum.image)    w.push('・画像 '+sum.image+'個は出していません（DXFは画像を線にできません）');
+  if(sum.fillPath && !opt.fill) w.push('・塗りつぶし '+sum.fillPath+'個は出していません（「塗りつぶしの輪郭も出す」で含められます）');
+  if(sum.curve)    w.push('・曲線 '+sum.curve+'本を'+(opt.curve?('直線に分けました（誤差'+opt.tol+'mm以内）'):'両端を結ぶ直線で代用しました'));
+  if(sum.clip)     w.push('・切り抜き枠 '+sum.clip+'個は線として出していません');
+  if(sum.textPath) w.push('・文字の字形として描かれた図形 '+sum.textPath+'個は除きました');
+  if(sum.shading)  w.push('・グラデーション '+sum.shading+'個は出せません');
+  if(sum.vertical) w.push('・縦書きの文字 '+sum.vertical+'個は位置がずれることがあります');
+  if(sum.skew)     w.push('・斜体・変形した文字 '+sum.skew+'個は形が変わります');
+  if(skipped)      w.push('・画像ページ '+skipped+'枚はDXFにできないので飛ばしました');
+  if(sum.cut)      w.push('⚠ 線が多すぎるため途中で打ち切りました。図面が欠けています');
+  if(w.length) rep += '\n' + w.join('\n');
+  rep += '\n\n※ 元のCADデータの復元ではありません。線幅・線種・色・レイヤーは失われています。'
+       + '\n※ CADで開いたら、寸法が合っているか必ず1か所測って確かめてください。';
+  $('cvreport').textContent = rep; $('cvreport').classList.add('on');
+  $('cvstat').textContent = '';
+  toast(done+'個のDXFを保存しました');
+}
+
+// --- 2点校正：図面の上で2点を指し、その実寸(mm)から縮尺を割り出す ---
+function cvCalibrate(p){
+  return new Promise(async (resolve)=>{
+    const sz = await pagePtSize(p);
+    const longPt = Math.max(sz.w, sz.h);
+    const longEdge = cvFitLongEdge(2400, Math.min(sz.w,sz.h)/longPt);
+    const scale = longEdge/longPt;                      // 画面のピクセル ÷ scale = PDFのpt
+    const src = await renderPageCanvas(p, longEdge);
+    const cv = $('cvcalcv'); cv.width=src.width; cv.height=src.height;
+    const ctx = cv.getContext('2d');
+    let pts=[];
+    const redraw=()=>{
+      ctx.drawImage(src,0,0);
+      ctx.lineWidth=2; ctx.strokeStyle='#e5352b'; ctx.fillStyle='#e5352b';
+      for(const q of pts){ ctx.beginPath(); ctx.arc(q[0],q[1],5,0,Math.PI*2); ctx.fill(); }
+      if(pts.length===2){ ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]); ctx.lineTo(pts[1][0],pts[1][1]); ctx.stroke(); }
+    };
+    redraw();
+    const posOf=(e)=>{ const r=cv.getBoundingClientRect(); return [(e.clientX-r.left)*cv.width/r.width, (e.clientY-r.top)*cv.height/r.height]; };
+    const finish=(val)=>{
+      cv.onclick=null; $('cvcalUndo').onclick=null; $('cvcalCancel').onclick=null;
+      $('cvcal').classList.remove('on');
+      src.width=0; src.height=0; cv.width=0; cv.height=0;
+      resolve(val);
+    };
+    cv.onclick=(e)=>{
+      if(pts.length>=2) return;
+      pts.push(posOf(e)); redraw();
+      if(pts.length===1){ $('cvcalmsg').textContent='もう1点をクリックしてください'; return; }
+      const dpx = Math.hypot(pts[1][0]-pts[0][0], pts[1][1]-pts[0][1]);
+      const dpt = dpx/scale;
+      if(dpt < 1){ toast('2点が近すぎます。もっと離れた2点を指してください'); pts=[]; redraw(); $('cvcalmsg').textContent='実寸の分かる2点をクリックしてください'; return; }
+      const ans = prompt('この2点間の実際の長さを mm で入力してください（例：910）\n\n※ 図面上で測った長さではなく、現物の寸法です', '910');
+      if(ans===null){ pts=[]; redraw(); $('cvcalmsg').textContent='実寸の分かる2点をクリックしてください'; return; }
+      const mm = parseFloat(ans);
+      if(!(mm>0)){ toast('数値で入力してください'); pts=[]; redraw(); return; }
+      finish(mm/dpt);                                    // 1ptあたりのmm
+    };
+    $('cvcalUndo').onclick=()=>{ pts=[]; redraw(); $('cvcalmsg').textContent='実寸の分かる2点をクリックしてください'; };
+    $('cvcalCancel').onclick=()=>finish(null);
+    $('cvcalmsg').textContent='図面上で、実寸の分かる2点をクリックしてください（例：通り芯の間）';
+    $('cvcal').classList.add('on');
+  });
 }
 
 // ==== 第2弾：書き込み（注釈） ================================================
@@ -2439,6 +3092,29 @@ $('btnExportAll').onclick = ()=>exportPdf(false);
 $('btnExportSel').onclick = ()=>exportPdf(true);
 $('btnPrint').onclick = printPdf;
 $('btnClear').onclick = clearAll;
+// --- 変換ダイアログ ---
+$('btnConvert').onclick = openConvert;
+$('cvClose').onclick = closeConvert;
+$('cvRun').onclick = ()=>{                                   // 変換中は同じボタンが「中止」になる
+  if(cvBusy){ cvAbort = true; $('cvstat').textContent = 'このページが終わったら止めます…'; return; }
+  runConvert();
+};
+$('cvbg').addEventListener('click', (e)=>{ if(e.target===$('cvbg')) closeConvert(); });   // 背景クリックで閉じる
+document.querySelectorAll('#cvFmt button').forEach(b=> b.onclick = ()=>cvSetFmt(b.dataset.fmt));
+document.querySelectorAll('#cvScaleMode button').forEach(b=> b.onclick = ()=>{
+  cvScaleMode = b.dataset.sm;
+  document.querySelectorAll('#cvScaleMode button').forEach(x=>x.classList.toggle('active', x===b));
+  $('cvDenomBox').style.display = (cvScaleMode==='denom') ? '' : 'none';
+  $('cvScaleNote').textContent =
+    (cvScaleMode==='calib') ? '「変換して保存」を押すと図面が開きます。実寸の分かる2点をクリックして、その間の長さ（mm）を入力してください。'
+  : (cvScaleMode==='paper') ? '用紙の大きさをそのままmmにします（A3なら420×297mm）。図面の縮尺は反映されません。'
+  : 'PDFに「この図面は1/100」という情報は入っていません。上の指定を信じて換算します。印刷時に「用紙に合わせる」で縮小されたPDFでは寸法が合いません。';
+});
+document.querySelectorAll('#cvEnc button').forEach(b=> b.onclick = ()=>{
+  cvEnc = b.dataset.enc;
+  document.querySelectorAll('#cvEnc button').forEach(x=>x.classList.toggle('active', x===b));
+});
+$('cvDpi').onchange = cvUpdateNote;
 $('btnSelAll').onclick = selAll;
 $('btnSelNone').onclick = selNone;
 $('btnRotL').onclick = ()=>rotateSel(-1);
@@ -2499,7 +3175,12 @@ $('viewer').addEventListener('click',(e)=>{
   if(moved>6) return;                              // 画像をつかんで動かした直後＝閉じない
   if(e.target===$('viewer')) closeViewer();        // 何もない背景をクリックしたときだけ閉じる
 });
-window.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && $('viewer').classList.contains('on')) closeViewer(); });
+window.addEventListener('keydown',(e)=>{
+  if(e.key!=='Escape') return;
+  if($('cvcal').classList.contains('on')){ $('cvcalCancel').click(); return; }   // 校正中はまず校正を中止
+  if($('cvbg').classList.contains('on')){ closeConvert(); return; }
+  if($('viewer').classList.contains('on')) closeViewer();
+});
 $('viewer').addEventListener('wheel',(e)=>{
   if(e.shiftKey){ e.preventDefault(); $('viewer').scrollTop += e.deltaY; return; }   // Shift＋ホイール＝上下移動
   e.preventDefault();
