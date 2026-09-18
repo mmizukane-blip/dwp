@@ -1401,9 +1401,9 @@ async function printPdf(){
 // ==== 第5弾：変換（JPEG / PNG / DXF） ========================================
 // 変換の対象は「デスクで選んだ書類」または「開いている書類の（選んだ）ページ」。
 // 画像は1ページ＝1ファイルで保存する。ブラウザだけで完結し、通信はしない。
-// DXFは公開前レビューで直す点（切り抜きの未適用・UserUnit・曲線の分割上限）が見つかったため、
-// 直し終わるまでボタンを隠しておく。直したら true にするだけで元に戻る。
-const CV_DXF_READY = false;
+// DXFのボタンを出すかどうか。公開前レビューの指摘（切り抜きの未適用・UserUnit・曲線の分割上限）は直し、
+// 自己試験（tools/dxf_selftest.js）で確かめたので true。問題が見つかったら false にすれば隠せる。
+const CV_DXF_READY = true;
 let cvFmt='jpeg';          // 'jpeg' | 'png' | 'dxf'
 let cvScaleMode='denom';   // 'denom'（縮尺を入力）| 'calib'（2点校正）| 'paper'（用紙原寸）
 let cvEnc='utf8';          // 'utf8' | 'esc'
@@ -1484,13 +1484,16 @@ function cvFitLongEdge(longPx, ratio){
   if(L*L*ratio > CV_MAX_AREA) L = Math.sqrt(CV_MAX_AREA/ratio);
   return Math.floor(L);
 }
-// ページの紙の大きさ（pt単位・回転を反映）。画像ページは96dpiの紙として扱う。
+// ページの紙の大きさ（pt＝1/72インチ・回転を反映）。画像ページは96dpiの紙として扱う。
+// PDFの /UserUnit（座標1単位の倍率、既定1）を掛けて実際の紙の大きさにする。
+// PDF.js 3.11 の viewport は UserUnit を掛けていない（座標の単位のまま）ので、ここで掛ける。
 async function pagePtSize(p){
   const doc = docs.get(p.docId);
   if(doc.kind==='pdf'){
     const page = await (await pdfjsOf(doc)).getPage(p.pageIndex+1);
     const vp = page.getViewport({scale:1, rotation:p.rotation});
-    return {w:vp.width, h:vp.height, isPdf:true};
+    const uu = page.userUnit || 1;
+    return {w:vp.width*uu, h:vp.height*uu, isPdf:true, uu};
   }
   const cv = await renderPageCanvas(p, 4000);       // 画像は原寸が分からないので、まず実寸比だけ得る
   const w = cv.width*72/96, h = cv.height*72/96;
@@ -1575,16 +1578,202 @@ async function exportImages(t){
   toast(done + '個の画像のダウンロードを開始しました');
 }
 
+// ==== DXF：切り抜き（クリップ）の判定 =========================================
+// PDFで「見えている部分」だけをDXFに出すため、線分を切り抜き領域で切り詰める。
+// 領域どうしを合成（多角形の集合演算）はせず、有効な切り抜きを親をたどる連結リストで持ち、
+// 線分を1つずつ順に切っていく（合成は自己交差・穴・evenodd で壊れやすいため）。
+// 境界の上に乗った線は「見えている」扱いにする。CADのPDFは座標を丸めるので、
+// 図面枠が切り抜き枠から少しずれても消さないよう、幅 CV_EPS(pt) の遊びを持たせる。
+const CV_EPS = 0.02;
+const cvTmpA = [], cvTmpB = [];     // 候補の辺を入れる作業用の配列（使い回して、ごみを出さない）
+// 画面に処理を返す。背面タブでも遅らされにくい MessageChannel を使う（setTimeout は背面で大きく遅れる）
+const cvYield = ()=>new Promise(res=>{ const ch=new MessageChannel(); ch.port1.onmessage=()=>res(); ch.port2.postMessage(0); });
+const cvIsArr = (x,n)=>!!x && (Array.isArray(x) || ArrayBuffer.isView(x)) && x.length===n;
+
+// 線分 A→B のうち t∈[t0,t1] の部分を、軸に平行な長方形 [x0,y0,x1,y1] で切る（Liang–Barsky法）。
+// 枠を横切る線は枠ちょうどで切る。遊び CV_EPS は「枠とほぼ平行に、枠の上を走る線」を残すためだけに使う
+// （遊びで切る位置までずらすと、横切る線が枠から少しはみ出してしまう）。
+function cvClipRectT(ax,ay,bx,by,t0,t1,x0,y0,x1,y1){
+  const dx=bx-ax, dy=by-ay;
+  const p=[-dx, dx, -dy, dy];                      // 内側の条件は p*t <= q
+  const q=[ax-x0, x1-ax, ay-y0, y1-ay];
+  for(let k=0;k<4;k++){
+    if(Math.abs(p[k]) <= CV_EPS){                  // この枠の方向にほとんど動かない線
+      const lo=Math.min(p[k]*t0, p[k]*t1), hi=Math.max(p[k]*t0, p[k]*t1);
+      if(hi <= q[k]) continue;                     // 全部が枠の内側
+      if(lo > q[k]+CV_EPS) return null;            // 全部が遊びの幅より外
+      let t;
+      if(lo < q[k]) t=q[k]/p[k];                   // 枠をまたいでいる（短い急角度の線など）：枠ちょうどで切る
+      else if(hi > q[k]+CV_EPS) t=(q[k]+CV_EPS)/p[k];   // 枠の外側を枠に沿って走る線：遊びの幅に入る部分は残す（T10・T12）
+      else continue;                               // 全体が遊びの幅の中＝枠の上の線として残す
+      if(p[k]<0){ if(t>t0) t0=t; } else { if(t<t1) t1=t; }
+      if(t0>t1) return null;
+      continue;
+    }
+    const t=q[k]/p[k];
+    if(p[k]<0){ if(t>t0) t0=t; } else { if(t<t1) t1=t; }
+    if(t0>t1) return null;
+  }
+  return [t0,t1];
+}
+// 輪郭が1つで、軸に平行な本物の長方形なら長方形として扱う（速い計算で切れる）。
+// 「4点・辺が縦か横」だけでは、線を行って戻る面積ゼロの輪郭（0,0→100,0→0,0→0,100）まで長方形と誤認するので、
+// x・yがちょうど2種類ずつ・4つの角がちょうど1回ずつ・隣り合う点は1つの座標だけが違う、まで確かめる。
+function cvRectOf(polys){
+  if(polys.length!==1) return null;
+  let P=polys[0];
+  if(P.length===5 && P[0][0]===P[4][0] && P[0][1]===P[4][1]) P=P.slice(0,4);
+  if(P.length!==4) return null;
+  const xs=[...new Set(P.map(q=>q[0]))], ys=[...new Set(P.map(q=>q[1]))];
+  if(xs.length!==2 || ys.length!==2) return null;                 // 幅・高さがゼロでない
+  const corners=new Set(P.map(q=>q[0]+','+q[1]));
+  if(corners.size!==4) return null;                                // 4つの角が1回ずつ
+  for(let i=0;i<4;i++){
+    const a=P[i], b=P[(i+1)%4];
+    if((a[0]!==b[0]) === (a[1]!==b[1])) return null;               // 隣は縦か横に1つだけずれる（対角に飛ばない）
+  }
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+// 切り抜き領域を1つ作る。polys は折れ線にした輪郭の配列（各輪郭は暗黙に閉じる）。parent は1つ外側の切り抜き
+function cvMakeClip(polys, rule, parent){
+  const rc = cvRectOf(polys);
+  if(rc) return {parent, kind:'rect', rect:rc};
+  const E=[]; let bx0=Infinity, by0=Infinity, bx1=-Infinity, by1=-Infinity;
+  for(const P of polys){
+    const n=P.length; if(n<2) continue;
+    for(let i=0;i<n;i++){
+      const a=P[i], b=P[(i+1)%n];
+      if(a[0]<bx0) bx0=a[0]; if(a[0]>bx1) bx1=a[0]; if(a[1]<by0) by0=a[1]; if(a[1]>by1) by1=a[1];
+      if(a[0]===b[0] && a[1]===b[1]) continue;
+      E.push(a[0],a[1],b[0],b[1]);
+    }
+  }
+  const ne=E.length/4;
+  if(!ne) return {parent, kind:'empty'};              // 面積のない切り抜き＝以後は何も見えない
+  const e=new Float64Array(E);
+  const cl=(v,n)=>v<0?0:(v>=n?n-1:v);
+  // 登録数の目安（長い辺が多い輪郭でもメモリを使いすぎないよう、帯と升目の細かさを抑える）
+  const BUDGET=3000000;
+  const spanW=Math.max(bx1-bx0, by1-by0, 1e-9);
+  let sumDy=0, sumLen=0;
+  for(let k=0;k<ne;k++){ const ddx=e[4*k+2]-e[4*k], ddy=e[4*k+3]-e[4*k+1]; sumDy+=Math.abs(ddy); sumLen+=Math.hypot(ddx,ddy); }
+  // 点の内外判定用：高さ方向の帯ごとに、その高さをまたぐ辺を登録しておく
+  const nb=Math.max(1, Math.min(512, Math.ceil(ne/4), Math.floor(BUDGET/Math.max(1, sumDy/Math.max(by1-by0,1e-9)))));
+  const bh=Math.max((by1-by0)/nb, 1e-9);
+  const bands=Array.from({length:nb}, ()=>[]);
+  // 交点探し・境界判定用：升目ごとに、そこを通る辺を登録しておく（総当たりを避ける）
+  const G=Math.max(1, Math.min(64, Math.ceil(Math.sqrt(ne)), Math.floor(BUDGET/Math.max(1, 12*sumLen/spanW))));
+  const gx0=bx0-CV_EPS, gy0=by0-CV_EPS;
+  const cw=Math.max((bx1-bx0+2*CV_EPS)/G, 1e-9), ch=Math.max((by1-by0+2*CV_EPS)/G, 1e-9);
+  const cells=Array.from({length:G*G}, ()=>[]);
+  const mark=new Int32Array(G*G).fill(-1);          // 同じ辺を同じ升目に2度登録しないための印
+  const step=Math.min(cw,ch)/2;
+  for(let k=0;k<ne;k++){
+    const x1=e[4*k], y1=e[4*k+1], x2=e[4*k+2], y2=e[4*k+3];
+    const b0=cl(Math.floor((Math.min(y1,y2)-by0)/bh),nb), b1=cl(Math.floor((Math.max(y1,y2)-by0)/bh),nb);
+    for(let b=b0;b<=b1;b++) bands[b].push(k);
+    // 辺に沿って升目の半分ずつ進み、通った升目とその周り（3×3）に登録する。
+    // 周りまで含めるので、升目の角をかすめるだけの辺や、境界から CV_EPS 以内の点も取りこぼさない。
+    const n=Math.max(1, Math.ceil(Math.hypot(x2-x1,y2-y1)/step));
+    for(let s=0;s<=n;s++){
+      const gx=Math.floor((x1+(x2-x1)*s/n-gx0)/cw), gy=Math.floor((y1+(y2-y1)*s/n-gy0)/ch);
+      for(let j=gy-1;j<=gy+1;j++){ if(j<0||j>=G) continue;
+        for(let i=gx-1;i<=gx+1;i++){ if(i<0||i>=G) continue;
+          const c=j*G+i; if(mark[c]!==k){ mark[c]=k; cells[c].push(k); } } }
+    }
+  }
+  return {parent, kind:'poly', evenodd:(rule==='evenodd'), e, ne, bbox:[bx0,by0,bx1,by1],
+          nb, bh, bands, G, gx0, gy0, cw, ch, cells, stamp:new Int32Array(ne), tick:0};
+}
+// 範囲 [x0,y0]-[x1,y1] に掛かる升目の辺を、重複なしで集める
+function cvCand(c, x0,y0,x1,y1, out){
+  const cl=(v,n)=>v<0?0:(v>=n?n-1:v);
+  const i0=cl(Math.floor((x0-c.gx0)/c.cw),c.G), i1=cl(Math.floor((x1-c.gx0)/c.cw),c.G);
+  const j0=cl(Math.floor((y0-c.gy0)/c.ch),c.G), j1=cl(Math.floor((y1-c.gy0)/c.ch),c.G);
+  const tk=++c.tick; out.length=0;
+  for(let j=j0;j<=j1;j++) for(let i=i0;i<=i1;i++){
+    for(const k of c.cells[j*c.G+i]){ if(c.stamp[k]!==tk){ c.stamp[k]=tk; out.push(k); } }
+  }
+  return out;
+}
+// 点が多角形の切り抜きの内側か（境界の上は内側。nonzero＝向き付きの交差の合計、evenodd＝交差回数の偶奇）
+function cvInsidePoly(c, x, y){
+  const bb=c.bbox, e=c.e;
+  if(x<bb[0]-CV_EPS || x>bb[2]+CV_EPS || y<bb[1]-CV_EPS || y>bb[3]+CV_EPS) return false;
+  for(const k of cvCand(c, x-CV_EPS, y-CV_EPS, x+CV_EPS, y+CV_EPS, cvTmpB)){
+    const x1=e[4*k], y1=e[4*k+1], vx=e[4*k+2]-x1, vy=e[4*k+3]-y1, L2=vx*vx+vy*vy;
+    let s=L2>0 ? ((x-x1)*vx+(y-y1)*vy)/L2 : 0; s=s<0?0:(s>1?1:s);
+    const qx=x1+s*vx-x, qy=y1+s*vy-y;
+    if(qx*qx+qy*qy <= CV_EPS*CV_EPS) return true;
+  }
+  let b=Math.floor((y-bb[1])/c.bh); b=b<0?0:(b>=c.nb?c.nb-1:b);
+  let wn=0, cr=0;
+  for(const k of c.bands[b]){                       // 点から右へ伸ばした半直線と交わる辺を数える
+    const x1=e[4*k], y1=e[4*k+1], x2=e[4*k+2], y2=e[4*k+3];
+    const isl=(x2-x1)*(y-y1)-(x-x1)*(y2-y1);
+    if(y1<=y){ if(y2>y && isl>0){ wn++; cr++; } }
+    else { if(y2<=y && isl<0){ wn--; cr++; } }
+  }
+  return c.evenodd ? (cr%2===1) : (wn!==0);
+}
+// 線分 A→B のうち t∈[t0,t1] の部分を多角形で切り、内側の区間を out に足す
+// （境界との交点で小区間に分け、各区間の中点が内側かで残すか決める）
+function cvClipPolyT(c, ax,ay,bx,by, t0,t1, out){
+  const dx=bx-ax, dy=by-ay, dl=Math.hypot(dx,dy);
+  const px0=ax+dx*t0, py0=ay+dy*t0, px1=ax+dx*t1, py1=ay+dy*t1;
+  const sx0=Math.min(px0,px1), sx1=Math.max(px0,px1), sy0=Math.min(py0,py1), sy1=Math.max(py0,py1);
+  const bb=c.bbox, e=c.e;
+  if(sx1<bb[0]-CV_EPS || sx0>bb[2]+CV_EPS || sy1<bb[1]-CV_EPS || sy0>bb[3]+CV_EPS) return;
+  const ts=[t0,t1];
+  for(const k of cvCand(c, sx0-CV_EPS, sy0-CV_EPS, sx1+CV_EPS, sy1+CV_EPS, cvTmpA)){
+    const x1=e[4*k], y1=e[4*k+1], ex=e[4*k+2]-x1, ey=e[4*k+3]-y1;
+    const den=dx*ey-dy*ex;
+    if(Math.abs(den) <= 1e-12*dl*Math.hypot(ex,ey)) continue;   // 平行（重なる部分は中点の境界判定で拾う）
+    const t=((x1-ax)*ey-(y1-ay)*ex)/den, u=((x1-ax)*dy-(y1-ay)*dx)/den;
+    if(u<-1e-9 || u>1+1e-9) continue;
+    if(t>t0 && t<t1) ts.push(t);
+  }
+  ts.sort((p,q)=>p-q);
+  for(let i=0;i<ts.length-1;i++){
+    const a=ts[i], b=ts[i+1];
+    if((b-a)*dl < 1e-7) continue;
+    const m=(a+b)/2;
+    if(cvInsidePoly(c, ax+dx*m, ay+dy*m)){
+      const last=out[out.length-1];
+      if(last && a-last[1] <= 1e-12) last[1]=b; else out.push([a,b]);
+    }
+  }
+}
+// 線分1本を、用紙の範囲とすべての切り抜きで切り、見えている部分を out に足す。形が変わったら true
+function cvClipSeg(s, chain, W, H, out){
+  const ax=s[0], ay=s[1], bx=s[2], by=s[3], dx=bx-ax, dy=by-ay, dl=Math.hypot(dx,dy);
+  if(!(dl>0)) return false;
+  let pieces=[];
+  const r0=cvClipRectT(ax,ay,bx,by,0,1,0,0,W,H);
+  if(r0) pieces.push(r0);
+  for(let c=chain; c && pieces.length; c=c.parent){
+    const next=[];
+    if(c.kind==='rect'){ const R=c.rect; for(const p of pieces){ const q=cvClipRectT(ax,ay,bx,by,p[0],p[1],R[0],R[1],R[2],R[3]); if(q) next.push(q); } }
+    else if(c.kind==='poly'){ for(const p of pieces) cvClipPolyT(c, ax,ay,bx,by, p[0],p[1], next); }
+    pieces=next;                                     // kind==='empty' は何も残らない
+  }
+  const whole = pieces.length===1 && pieces[0][0]<=1e-12 && pieces[0][1]>=1-1e-12;
+  if(whole){ out.push(s); return false; }
+  for(const p of pieces){ if((p[1]-p[0])*dl >= 1e-6) out.push([ax+dx*p[0], ay+dy*p[0], ax+dx*p[1], ay+dy*p[1]]); }
+  return true;
+}
+
 // --- PDFのページから、DXFに出す線と文字を取り出す ---
 // 吸着用の extractPageSnap とは別の経路にしている。あちらは画面座標を0〜1に正規化するため
 // 絶対寸法が消えており、DXFには使えない。こちらは PDFユーザー空間(pt) のまま最後まで持つ。
 async function extractVectors(page, rotation, opt){
   const OPS = pdfjsLib.OPS;
   const ol = await page.getOperatorList({intent:'display', annotationMode:0});  // 後から足した注釈は本文でないので除く
-  const view = page.view;                              // CropBox [x0,y0,x1,y1]
+  const view = page.view;                              // 表示範囲 [x0,y0,x1,y1]（PDF.jsが CropBox と MediaBox から決めたもの）
   const vw = view[2]-view[0], vh = view[3]-view[1];
   const r = ((rotation%360)+360)%360;
-  const st = {curve:0, fillPath:0, clip:0, image:0, textPath:0, shading:0, cut:false};
+  const W = (r===90||r===270)?vh:vw, H = (r===90||r===270)?vw:vh;   // 回転後の用紙の幅・高さ
+  const st = {curve:0, curveCapped:0, fillPath:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false, aborted:false};
 
   // CropBox基準へ寄せ、DWPで回した向きに合わせる（DXFもPDFもY上向きなので反転は不要）
   const toPage = (x,y)=>{
@@ -1597,97 +1786,175 @@ async function extractVectors(page, rotation, opt){
   const mul = (m,a)=>[m[0]*a[0]+m[2]*a[1], m[1]*a[0]+m[3]*a[1], m[0]*a[2]+m[2]*a[3], m[1]*a[2]+m[3]*a[3], m[0]*a[4]+m[2]*a[5]+m[4], m[1]*a[4]+m[3]*a[5]+m[5]];
   const ap  = (m,x,y)=>[m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];
 
-  let ctm=[1,0,0,1,0,0]; const stack=[];
+  // 状態：変換行列(ctm)と切り抜き(clip)は save/restore で一緒に出し入れする
+  let ctm=[1,0,0,1,0,0], clip=null; const stack=[];
   const segs=[]; const MAX=400000;
   let inText=0;             // テキストの中（Type3フォントの字形を線として拾わないための目印）
-  let buf=[];               // 組み立て中のパス（塗りか線かは、後から来る命令で決まる）
+  // 組み立て中のパス。輪郭(sub)ごとに {cmd, closed}。cmd は点 [x,y] か曲線 [x1,y1,x2,y2,x3,y3]（ページ座標）。
+  // 線か塗りか切り抜きかは、後から来る命令で決まる。
+  let subs=[], cur=null, cx=0, cy=0, sx=0, sy=0;
+  let pendingClip=null;     // 'nonzero' | 'evenodd'。描画命令が終わった時点で確定する（PDF.jsと同じ順序）
 
-  // 3次ベジエを、許容誤差におさまる本数の直線に分ける
-  const tolPt = Math.max(opt.tolPt||0.5, 0.001);
-  const bez=(p0,p1,p2,p3,out)=>{
-    const d1=Math.hypot(p0[0]-2*p1[0]+p2[0], p0[1]-2*p1[1]+p2[1]);
-    const d2=Math.hypot(p1[0]-2*p2[0]+p3[0], p1[1]-2*p2[1]+p3[1]);
-    let n=Math.ceil(Math.sqrt(0.75*Math.max(d1,d2)/tolPt));
-    n=Math.max(1, Math.min(64, n||1));
-    let prev=p0;
-    for(let k=1;k<=n;k++){
-      const s=k/n, u=1-s;
-      const x=u*u*u*p0[0] + 3*u*u*s*p1[0] + 3*u*s*s*p2[0] + s*s*s*p3[0];
-      const y=u*u*u*p0[1] + 3*u*u*s*p1[1] + 3*u*s*s*p2[1] + s*s*s*p3[1];
-      out.push([prev[0],prev[1],x,y]); prev=[x,y];
+  // 曲線を折れ線にする。描く線は tolPt、切り抜きの輪郭はそれより細かく（粗いと切りすぎ・切り残しが出る）
+  const tolPt = Math.max(opt.tolPt||0.5, 1e-4);
+  const tolClip = Math.min(tolPt/4, 0.05);
+  const BEZ_MAX = 1024;     // 1本の曲線を分ける上限。超えたら誤差が指定を超えるので件数を報告する
+  const flatten=(sub, tol, forDraw)=>{
+    const pts=[sub.cmd[0]]; let prev=sub.cmd[0];
+    for(let i=1;i<sub.cmd.length;i++){
+      const c=sub.cmd[i];
+      if(c.length===2){ pts.push(c); prev=c; continue; }
+      const p0=prev, p3=[c[4],c[5]];
+      let n=1;                                         // 描く線で「分けない」指定なら、両端を結ぶ直線で代用
+      if(!forDraw || opt.curve){
+        const d1=Math.hypot(p0[0]-2*c[0]+c[2], p0[1]-2*c[1]+c[3]);
+        const d2=Math.hypot(c[0]-2*c[2]+c[4], c[1]-2*c[3]+c[5]);
+        n=Math.ceil(Math.sqrt(0.75*Math.max(d1,d2)/tol))||1;
+        if(n>BEZ_MAX){ n=BEZ_MAX; if(forDraw) st.curveCapped++; }
+      }
+      if(forDraw) st.curve++;
+      for(let k=1;k<=n;k++){
+        const s=k/n, u=1-s, A=u*u*u, B=3*u*u*s, C=3*u*s*s, D=s*s*s;
+        pts.push([A*p0[0]+B*c[0]+C*c[2]+D*c[4], A*p0[1]+B*c[1]+C*c[3]+D*c[5]]);
+      }
+      prev=p3;
+    }
+    return pts;
+  };
+  // 重い処理の途中で、約50msごとに画面へ処理を返す（固まらず、「中止」が効くように）
+  let lastYield=performance.now();
+  const breathe=async ()=>{
+    if(performance.now()-lastYield<=50) return;
+    await cvYield(); lastYield=performance.now();
+    if(cvAbort) st.aborted=true;
+  };
+  // 線分を1本出す（用紙と切り抜きで切ってから）。1本が切り抜きで何区間にも分かれても上限を超えないようにする
+  const emit=(s)=>{
+    if(st.cut) return;
+    if(cvClipSeg(s, clip, W, H, segs)) st.clipped++;
+    if(segs.length>MAX){ segs.length=MAX; st.cut=true; }
+  };
+  // 組み立てたパスを線分にして出す。closeAll=true は塗りの輪郭（開いた輪郭も暗黙に閉じる）
+  const outPath=async (closeAll)=>{
+    for(const sub of subs){
+      const pts=flatten(sub, tolPt, true);
+      for(let i=0;i<pts.length-1;i++){
+        emit([pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1]]);
+        if((i & 255)===255){ await breathe(); if(st.aborted || st.cut) return; }
+      }
+      if((sub.closed||closeAll) && pts.length>2){
+        const a=pts[pts.length-1], b=pts[0];
+        if(a[0]!==b[0] || a[1]!==b[1]) emit([a[0],a[1],b[0],b[1]]);
+      }
+      await breathe(); if(st.aborted || st.cut) return;
     }
   };
-  const flush=(keep)=>{                                  // keep=true なら採用、false なら捨てる
-    if(keep){ for(const s of buf){ if(segs.length<MAX) segs.push(s); } }
-    buf=[];
+  // 描画命令の後始末：保留中の切り抜きを（描画を終えた後で）確定し、パスを捨てる
+  const finishPath=()=>{
+    if(pendingClip){
+      const polys=subs.map(s=>flatten(s, tolClip, false)).filter(p=>p.length>=2);
+      clip=cvMakeClip(polys, pendingClip, clip);
+      pendingClip=null;
+    }
+    subs=[]; cur=null;
   };
 
   for(let i=0;i<ol.fnArray.length;i++){
-    if(segs.length>=MAX){ st.cut=true; break; }
+    if(st.cut || st.aborted) break;
+    if((i & 255)===0){ await breathe(); if(st.aborted) break; }    // 重いページでも画面が固まらず「中止」が効くように
     const fn=ol.fnArray[i], a=ol.argsArray[i];
-    if(fn===OPS.save){ stack.push(ctm); continue; }
-    if(fn===OPS.restore){ ctm=stack.pop()||[1,0,0,1,0,0]; continue; }
+    // 保存と復元。対になる save が無い restore は何もしない（PDF.jsの描画と同じ）
+    if(fn===OPS.save){ stack.push([ctm,clip]); continue; }
+    if(fn===OPS.restore){ const s=stack.pop(); if(s){ ctm=s[0]; clip=s[1]; } continue; }
     if(fn===OPS.transform){ ctm=mul(ctm,a); continue; }
-    // 図形の中に埋め込まれた小図形（Form XObject）は、自前の変換行列を持つので追従する
-    if(fn===OPS.paintFormXObjectBegin){ stack.push(ctm); if(Array.isArray(a[0])&&a[0].length===6) ctm=mul(ctm,a[0]); continue; }
-    if(fn===OPS.paintFormXObjectEnd){ ctm=stack.pop()||[1,0,0,1,0,0]; continue; }
+    // 図形の中に埋め込まれた小図形（Form XObject）：自前の変換行列を持ち、枠（BBox）の外は切り抜かれる
+    if(fn===OPS.paintFormXObjectBegin){
+      stack.push([ctm,clip]);
+      if(cvIsArr(a[0],6)) ctm=mul(ctm,a[0]);
+      const bb=a[1];
+      if(cvIsArr(bb,4)){
+        const q=[[bb[0],bb[1]],[bb[2],bb[1]],[bb[2],bb[3]],[bb[0],bb[3]]].map(([x,y])=>{ const u=ap(ctm,x,y); return toPage(u[0],u[1]); });
+        clip=cvMakeClip([q], 'nonzero', clip);
+      }
+      continue;
+    }
+    if(fn===OPS.paintFormXObjectEnd){ const s=stack.pop(); if(s){ ctm=s[0]; clip=s[1]; } continue; }
     if(fn===OPS.beginText){ inText++; continue; }
     if(fn===OPS.endText){ inText=Math.max(0,inText-1); continue; }
-    if(fn===OPS.paintImageXObject || fn===OPS.paintInlineImageXObject || fn===OPS.paintImageMaskXObject){ st.image++; continue; }
+    if(fn===OPS.paintImageXObject || fn===OPS.paintInlineImageXObject || fn===OPS.paintImageMaskXObject ||
+       fn===OPS.paintImageXObjectRepeat || fn===OPS.paintImageMaskXObjectRepeat ||
+       fn===OPS.paintImageMaskXObjectGroup || fn===OPS.paintSolidColorImageMask){ st.image++; continue; }
     if(fn===OPS.shadingFill){ st.shading++; continue; }
 
     if(fn===OPS.constructPath){
-      const ops=a[0], co=a[1]; let ci=0, cx=0, cy=0, sx=0, sy=0;
+      const ops=a[0], co=a[1]; let ci=0;
       const P=(x,y)=>{ const u=ap(ctm,x,y); return toPage(u[0],u[1]); };
+      const start=()=>{ if(!cur){ cur={cmd:[P(cx,cy)], closed:false}; subs.push(cur); } };   // 閉じた後の続きは始点から新しい輪郭
       for(const op of ops){
-        if(op===OPS.moveTo){ cx=co[ci++]; cy=co[ci++]; sx=cx; sy=cy; }
-        else if(op===OPS.lineTo){ const nx=co[ci++], ny=co[ci++]; const A=P(cx,cy), B=P(nx,ny); buf.push([A[0],A[1],B[0],B[1]]); cx=nx; cy=ny; }
+        if(op===OPS.moveTo){ cx=co[ci++]; cy=co[ci++]; sx=cx; sy=cy; cur={cmd:[P(cx,cy)], closed:false}; subs.push(cur); }
+        else if(op===OPS.lineTo){ start(); cx=co[ci++]; cy=co[ci++]; cur.cmd.push(P(cx,cy)); }
         else if(op===OPS.curveTo || op===OPS.curveTo2 || op===OPS.curveTo3){
           let x1,y1,x2,y2,x3,y3;
           if(op===OPS.curveTo){ x1=co[ci++]; y1=co[ci++]; x2=co[ci++]; y2=co[ci++]; x3=co[ci++]; y3=co[ci++]; }
-          else if(op===OPS.curveTo2){ x1=cx; y1=cy; x2=co[ci++]; y2=co[ci++]; x3=co[ci++]; y3=co[ci++]; }
-          else { x1=co[ci++]; y1=co[ci++]; x3=co[ci++]; y3=co[ci++]; x2=x3; y2=y3; }
-          st.curve++;
-          if(opt.curve) bez(P(cx,cy), P(x1,y1), P(x2,y2), P(x3,y3), buf);
-          else { const A=P(cx,cy), B=P(x3,y3); buf.push([A[0],A[1],B[0],B[1]]); }   // 分割しない指定なら弦で近似
+          else if(op===OPS.curveTo2){ x1=cx; y1=cy; x2=co[ci++]; y2=co[ci++]; x3=co[ci++]; y3=co[ci++]; }   // v：1つ目の制御点＝今の点
+          else { x1=co[ci++]; y1=co[ci++]; x3=co[ci++]; y3=co[ci++]; x2=x3; y2=y3; }                        // y：2つ目の制御点＝終点
+          start();
+          const p1=P(x1,y1), p2=P(x2,y2), p3=P(x3,y3);
+          cur.cmd.push([p1[0],p1[1],p2[0],p2[1],p3[0],p3[1]]);
           cx=x3; cy=y3;
         }
-        else if(op===OPS.closePath){ const A=P(cx,cy), B=P(sx,sy); buf.push([A[0],A[1],B[0],B[1]]); cx=sx; cy=sy; }
+        else if(op===OPS.closePath){ if(cur) cur.closed=true; cx=sx; cy=sy; cur=null; }
         else if(op===OPS.rectangle){
           const x=co[ci++], y=co[ci++], w=co[ci++], h=co[ci++];
-          const c1=P(x,y), c2=P(x+w,y), c3=P(x+w,y+h), c4=P(x,y+h);
-          buf.push([c1[0],c1[1],c2[0],c2[1]],[c2[0],c2[1],c3[0],c3[1]],[c3[0],c3[1],c4[0],c4[1]],[c4[0],c4[1],c1[0],c1[1]]);
-          cx=x; cy=y; sx=x; sy=y;
+          subs.push({cmd:[P(x,y), P(x+w,y), P(x+w,y+h), P(x,y+h)], closed:true});
+          cx=x; cy=y; sx=x; sy=y; cur=null;
         }
       }
       continue;
     }
     // パスの意味は、後ろに来るこの命令で決まる。線として描かれたものだけを採るのが基本。
-    if(fn===OPS.stroke || fn===OPS.closeStroke){ if(inText>0){ st.textPath++; flush(false); } else flush(true); continue; }
+    // どの命令でも、描き終えた後に finishPath() で保留中の切り抜きを確定する（re W S の四角形は自分では切られない）
+    if(fn===OPS.stroke || fn===OPS.closeStroke){
+      if(fn===OPS.closeStroke && subs.length) subs[subs.length-1].closed=true;
+      if(inText>0) st.textPath++; else await outPath(false);
+      finishPath(); continue;
+    }
     if(fn===OPS.fill || fn===OPS.eoFill){
-      if(inText>0){ st.textPath++; flush(false); }                 // 文字の字形（Type3など）は線にしない
-      else { st.fillPath++; flush(!!opt.fill); }
-      continue;
+      if(inText>0) st.textPath++;                                   // 文字の字形（Type3など）は線にしない
+      else { st.fillPath++; if(opt.fill) await outPath(true); }
+      finishPath(); continue;
     }
     if(fn===OPS.fillStroke || fn===OPS.eoFillStroke || fn===OPS.closeFillStroke || fn===OPS.closeEOFillStroke){
-      if(inText>0){ st.textPath++; flush(false); } else flush(true); continue;
+      if((fn===OPS.closeFillStroke || fn===OPS.closeEOFillStroke) && subs.length) subs[subs.length-1].closed=true;
+      if(inText>0) st.textPath++; else await outPath(false);
+      finishPath(); continue;
     }
-    if(fn===OPS.clip || fn===OPS.eoClip){ st.clip++; continue; }   // 切り抜き枠は図形ではないので出さない
-    if(fn===OPS.endPath){ flush(false); continue; }                // 描かれずに終わったパスは捨てる
+    if(fn===OPS.clip){ pendingClip='nonzero'; st.clip++; continue; }  // ここでは保留だけ。確定は次の描画命令の後
+    if(fn===OPS.eoClip){ pendingClip='evenodd'; st.clip++; continue; }
+    if(fn===OPS.endPath){ finishPath(); continue; }                     // 描かれずに終わったパス（切り抜き用など）
   }
-  flush(false);
 
   // --- 文字 ---
-  const texts=[]; const tst={vertical:0, skew:0, wide:0};
-  if(opt.text){
+  const texts=[]; const tst={vertical:0, skew:0, wide:0, out:0};
+  if(opt.text && !st.aborted){
     try{
       const tc = await page.getTextContent();
+      if(cvAbort){ st.aborted=true; tc.items.length=0; }          // 文字の取得中に「中止」が押された
       for(const it of tc.items){
         if(!it.str || !it.str.trim()) continue;
         const tr = it.transform;
         const hx = Math.hypot(tr[0], tr[1]);        // 横方向の伸び
         const hy = Math.hypot(tr[2], tr[3]);        // 文字の高さ
         if(!(hy>0)) continue;
+        // 用紙の外の文字は出さない。挿入点1つではなく文字の四隅を囲む四角形で見て、一部でも用紙に掛かれば残す
+        // （回転した文字では囲む四角形のほうが広いので、迷うものは残す側に倒れる。欠落のほうが危険なため）。
+        // なお PDF.js 3.11 の getTextContent 自体も用紙外の文字を1文字単位で落とす（実測）ので、これは二重の保険。
+        // getTextContent からは切り抜きの状態が分からないため、切り抜きの外の文字までは除けない。
+        const w=it.width||0, h=it.height||hy;
+        const ux=hx>0?tr[0]/hx:1, uy=hx>0?tr[1]/hx:0, vx=tr[2]/hy, vy=tr[3]/hy;
+        const cs=[[0,0],[w,0],[0,h],[w,h]].map(([p,q])=>toPage(tr[4]+ux*p+vx*q, tr[5]+uy*p+vy*q));
+        const xs=cs.map(c=>c[0]), ys=cs.map(c=>c[1]);
+        if(Math.max(...xs)<-CV_EPS || Math.min(...xs)>W+CV_EPS || Math.max(...ys)<-CV_EPS || Math.min(...ys)>H+CV_EPS){ tst.out++; continue; }
         const ins = toPage(tr[4], tr[5]);           // 挿入点＝ベースラインの左端
         let ang = Math.atan2(tr[1], tr[0]) * 180/Math.PI - r;
         ang = ((ang%360)+360)%360;
@@ -1701,7 +1968,7 @@ async function extractVectors(page, rotation, opt){
       }
     }catch(e){ console.error(e); }
   }
-  return {segs, texts, st, tst, pageW:(r===90||r===270)?vh:vw, pageH:(r===90||r===270)?vw:vh};
+  return {segs, texts, st, tst, pageW:W, pageH:H};
 }
 
 // --- 取り出した線と文字を、CADが読めるASCII DXFの文字列に組み立てる ---
@@ -1774,7 +2041,8 @@ async function exportDxf(t){
     fill:  $('cvDxfFill').checked,
     tol:   Math.max(0.02, parseFloat($('cvTol').value)||0.2),
   };
-  // 1ptあたり何mmか。PDFは1pt=1/72インチなので、紙の上では 25.4/72 mm。
+  // 紙の上の1pt（1/72インチ）あたり何mmか。紙の上では 25.4/72 mm。
+  // PDFの座標1単位は「1pt × UserUnit」なので、ページごとに mmPerPt × UserUnit で換算する。
   let mmPerPt = 25.4/72;
   if(cvScaleMode==='denom') mmPerPt *= Math.max(1, parseFloat($('cvDenom').value)||100);
 
@@ -1787,13 +2055,13 @@ async function exportDxf(t){
     const r = await cvCalibrate(pdfPages[0]);
     $('cvbg').classList.add('on');
     if(!r){ $('cvstat').textContent='中止しました'; return; }
-    mmPerPt = r;
+    mmPerPt = r;                                                // 校正は紙の上のptで測っている（pagePtSize が UserUnit 込み）
   }
-  opt.tolPt = opt.tol / mmPerPt;                                // 許容誤差(mm)をPDFの単位に直す
 
   const many = pdfPages.length>1;
   let done=0, nSeg=0, nText=0;
-  const sum={curve:0, fillPath:0, clip:0, image:0, textPath:0, shading:0, cut:false, vertical:0, skew:0, wide:0, empty:0, textOnly:0};
+  const sum={curve:0, curveCapped:0, fillPath:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
+             vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0};
 
   for(let i=0;i<pdfPages.length;i++){
     if(cvAbort) break;
@@ -1802,15 +2070,19 @@ async function exportDxf(t){
     await new Promise(r=>setTimeout(r,0));
     const doc = docs.get(p.docId);
     const page = await (await pdfjsOf(doc)).getPage(p.pageIndex+1);
-    const v = await extractVectors(page, p.rotation, opt);
+    const uu = page.userUnit || 1;
+    if(uu!==1) sum.uuPages++;
+    const mmPerUnit = mmPerPt * uu;                             // このページの座標1単位あたりのmm
+    const v = await extractVectors(page, p.rotation, Object.assign({}, opt, {tolPt: opt.tol/mmPerUnit}));   // 許容誤差(mm)を座標の単位に直す
+    if(v.st.aborted || cvAbort) break;                          // 中止されたページは途中までなので保存しない
     nSeg += v.segs.length; nText += v.texts.length;
-    for(const k of ['curve','fillPath','clip','image','textPath','shading']) sum[k]+=v.st[k];
+    for(const k of ['curve','curveCapped','fillPath','clip','clipped','image','textPath','shading']) sum[k]+=v.st[k];
     if(v.st.cut) sum.cut=true;
-    sum.vertical+=v.tst.vertical; sum.skew+=v.tst.skew; sum.wide+=v.tst.wide;
+    sum.vertical+=v.tst.vertical; sum.skew+=v.tst.skew; sum.wide+=v.tst.wide; sum.textOut+=v.tst.out;
     if(!v.segs.length && !v.texts.length) sum.empty++;
     else if(!v.segs.length && v.texts.length) sum.textOnly++;      // 線が無く文字だけ＝スキャン＋OCR文字のPDF
 
-    const txt = buildDxf(v, mmPerPt, cvEnc);
+    const txt = buildDxf(v, mmPerUnit, cvEnc);
     const blob = new Blob([txt], {type:'application/dxf'});     // 文字列を渡すとUTF-8で書き出される
     const num = many ? ('_P'+String(i+1).padStart(2,'0')) : '';
     downloadBlob(blob, t.name + num + '.dxf');
@@ -1830,8 +2102,14 @@ async function exportDxf(t){
   if(sum.wide)     w.push('・横に極端に伸びた文字 '+sum.wide+'個は、幅を等倍に戻しました（OCR文字によくある形です）');
   if(sum.image)    w.push('・画像 '+sum.image+'個は出していません（DXFは画像を線にできません）');
   if(sum.fillPath && !opt.fill) w.push('・塗りつぶし '+sum.fillPath+'個は出していません（「塗りつぶしの輪郭も出す」で含められます）');
-  if(sum.curve)    w.push('・曲線 '+sum.curve+'本を'+(opt.curve?('直線に分けました（誤差'+opt.tol+'mm以内）'):'両端を結ぶ直線で代用しました'));
-  if(sum.clip)     w.push('・切り抜き枠 '+sum.clip+'個は線として出していません');
+  if(sum.curve){
+    if(!opt.curve)          w.push('・曲線 '+sum.curve+'本は、両端を結ぶ直線で代用しました');
+    else if(sum.curveCapped) w.push('⚠ 曲線 '+sum.curve+'本を直線に分けましたが、うち '+sum.curveCapped+'本は分ける本数の上限に達し、誤差が'+opt.tol+'mmを超えている可能性があります（許容誤差を大きくすると解消します）');
+    else                    w.push('・曲線 '+sum.curve+'本を直線に分けました（誤差'+opt.tol+'mm以内）');
+  }
+  if(sum.clipped)  w.push('・切り抜き（PDFで隠れている範囲）や用紙の外にはみ出した線 '+sum.clipped.toLocaleString()+'本を、見えている部分だけに切り詰めました');
+  if(sum.textOut)  w.push('・用紙の外にある文字 '+sum.textOut+'個は出していません');
+  if(sum.uuPages)  w.push('・座標の倍率（UserUnit）が1でないページ '+sum.uuPages+'枚は、その倍率を寸法に反映しました');
   if(sum.textPath) w.push('・文字の字形として描かれた図形 '+sum.textPath+'個は除きました');
   if(sum.shading)  w.push('・グラデーション '+sum.shading+'個は出せません');
   if(sum.vertical) w.push('・縦書きの文字 '+sum.vertical+'個は位置がずれることがあります');
@@ -1840,6 +2118,7 @@ async function exportDxf(t){
   if(sum.cut)      w.push('⚠ 線が多すぎるため途中で打ち切りました。図面が欠けています');
   if(w.length) rep += '\n' + w.join('\n');
   rep += '\n\n※ 元のCADデータの復元ではありません。線幅・線種・色・レイヤーは失われています。'
+       + '\n※ 白く塗って上から隠した線・透明にした線・切り抜きの外の文字は、DXFに出てしまうことがあります。'
        + '\n※ CADで開いたら、寸法が合っているか必ず1か所測って確かめてください。';
   $('cvreport').textContent = rep; $('cvreport').classList.add('on');
   $('cvstat').textContent = '';
