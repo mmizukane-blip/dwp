@@ -1401,6 +1401,9 @@ async function printPdf(){
 // ==== 第5弾：変換（JPEG / PNG / DXF） ========================================
 // 変換の対象は「デスクで選んだ書類」または「開いている書類の（選んだ）ページ」。
 // 画像は1ページ＝1ファイルで保存する。ブラウザだけで完結し、通信はしない。
+// DXFは公開前レビューで直す点（切り抜きの未適用・UserUnit・曲線の分割上限）が見つかったため、
+// 直し終わるまでボタンを隠しておく。直したら true にするだけで元に戻る。
+const CV_DXF_READY = false;
 let cvFmt='jpeg';          // 'jpeg' | 'png' | 'dxf'
 let cvScaleMode='denom';   // 'denom'（縮尺を入力）| 'calib'（2点校正）| 'paper'（用紙原寸）
 let cvEnc='utf8';          // 'utf8' | 'esc'
@@ -1441,8 +1444,11 @@ function openConvert(){
   $('cvbg').classList.add('on');
 }
 function closeConvert(){ if(cvBusy) return; $('cvbg').classList.remove('on'); }
+// 変換ダイアログか校正画面が出ているか（出ている間は、裏のデスクへの取り込み・貼り付けを受け付けない）
+function cvModalOpen(){ return $('cvbg').classList.contains('on') || $('cvcal').classList.contains('on'); }
 
 function cvSetFmt(f){
+  if(f==='dxf' && !CV_DXF_READY) return;
   cvFmt = f;
   document.querySelectorAll('#cvFmt button').forEach(b=>b.classList.toggle('active', b.dataset.fmt===f));
   $('cvImgOpt').style.display = (f==='dxf') ? 'none' : '';
@@ -1559,13 +1565,14 @@ async function exportImages(t){
   }
 
   const mb = (totalBytes/1048576).toFixed(1);
-  let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ') + done + '個の画像を保存しました（合計 約' + mb + 'MB）\n'
+  // ブラウザが実際に保存したかはアプリから確かめられないため「開始しました」と事実どおりに書く
+  let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ') + done + '個の画像のダウンロードを開始しました（合計 約' + mb + 'MB）\n'
           + '　形式：' + (cvFmt==='png'?'PNG':'JPEG（画質'+Math.round(qual*100)+'%）') + '　解像度：' + dpi + 'dpi';
   if(shrunk) rep += '\n⚠ ' + shrunk + 'ページは大きすぎたため、上限まで解像度を下げました。';
   if(many)   rep += '\n※ ブラウザが「複数のファイルのダウンロード」を尋ねたときは「許可」を選んでください。';
   $('cvreport').textContent = rep; $('cvreport').classList.add('on');
   $('cvstat').textContent = '';
-  toast(done + '個の画像を保存しました');
+  toast(done + '個の画像のダウンロードを開始しました');
 }
 
 // --- PDFのページから、DXFに出す線と文字を取り出す ---
@@ -1814,7 +1821,7 @@ async function exportDxf(t){
   const scaleTxt = (cvScaleMode==='calib') ? ('2点校正（1pt = '+mmPerPt.toFixed(4)+'mm）')
                  : (cvScaleMode==='paper') ? '用紙の原寸（1/1）'
                  : ('1/'+(parseFloat($('cvDenom').value)||100)+' として換算');
-  let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ')+done+'個のDXFを保存しました\n'
+  let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ')+done+'個のDXFのダウンロードを開始しました\n'
           + '　線（LINE）：'+nSeg.toLocaleString()+'本　文字（TEXT）：'+nText.toLocaleString()+'個\n'
           + '　実寸の決め方：'+scaleTxt+'　単位：mm　文字コード：'+(cvEnc==='utf8'?'UTF-8':'\\U+変換')+'\n';
   const w=[];
@@ -1836,7 +1843,7 @@ async function exportDxf(t){
        + '\n※ CADで開いたら、寸法が合っているか必ず1か所測って確かめてください。';
   $('cvreport').textContent = rep; $('cvreport').classList.add('on');
   $('cvstat').textContent = '';
-  toast(done+'個のDXFを保存しました');
+  toast(done+'個のDXFのダウンロードを開始しました');
 }
 
 // --- 2点校正：図面の上で2点を指し、その実寸(mm)から縮尺を割り出す ---
@@ -2300,7 +2307,7 @@ function setWriteUI(on){
   $('modebar').classList.toggle('on', on);
   const b=$('btnWrite'); b.classList.toggle('on', on);
   b.textContent = on ? '✓ 書き込み中：クリックで終了' : '✎ 書き込みモード：OFF';
-  ['btnOpen','btnOpen2','btnExportAll','btnExportSel','btnPrint','btnClear',
+  ['btnOpen','btnOpen2','btnExportAll','btnExportSel','btnPrint','btnConvert','btnClear',
    'btnSelAll','btnSelNone','btnRotL','btnRotR','btnUp','btnDown','btnDel','btnCopy','btnExtract'].forEach(id=>{ const e=$(id); if(e) e.disabled = on; });
   if(!on) updateStats();     // OFF時はページ有無に応じた本来の活性状態へ戻す
   updatePvNav();             // 書き込み中はページ送りも止める
@@ -3093,6 +3100,10 @@ $('btnExportSel').onclick = ()=>exportPdf(true);
 $('btnPrint').onclick = printPdf;
 $('btnClear').onclick = clearAll;
 // --- 変換ダイアログ ---
+if(!CV_DXF_READY){                                          // DXFは準備中：選べないように隠す
+  document.querySelector('#cvFmt button[data-fmt="dxf"]').style.display = 'none';
+  $('btnConvert').title = '画像（JPEG/PNG）に変換して保存します（DXFは準備中）';
+}
 $('btnConvert').onclick = openConvert;
 $('cvClose').onclick = closeConvert;
 $('cvRun').onclick = ()=>{                                   // 変換中は同じボタンが「中止」になる
@@ -3298,11 +3309,16 @@ window.addEventListener('keydown', (e)=>{
 
 // 画面全体へのドラッグ＆ドロップ取り込み
 let dragDepth=0;
-window.addEventListener('dragenter', (e)=>{ if(dragUid!=null) return; if(e.dataTransfer && Array.from(e.dataTransfer.types||[]).includes('Files')){ dragDepth++; $('drophint').classList.add('on'); } });
+window.addEventListener('dragenter', (e)=>{ if(dragUid!=null || cvModalOpen()) return; if(e.dataTransfer && Array.from(e.dataTransfer.types||[]).includes('Files')){ dragDepth++; $('drophint').classList.add('on'); } });
 window.addEventListener('dragover', (e)=>{ if(dragUid!=null) return; if(e.dataTransfer && Array.from(e.dataTransfer.types||[]).includes('Files')) e.preventDefault(); });
 window.addEventListener('dragleave', ()=>{ if(dragUid!=null) return; dragDepth=Math.max(0,dragDepth-1); if(dragDepth===0) $('drophint').classList.remove('on'); });
 window.addEventListener('drop', (e)=>{
   if(dragUid!=null) return;   // 内部の並べ替え中は「取り込み」にしない
+  if(cvModalOpen()){          // 変換の画面が出ている間は取り込まない。既定動作も止める（止めないとブラウザがPDFを開いてDWPから離れる）
+    e.preventDefault(); dragDepth=0; $('drophint').classList.remove('on');
+    toast('変換の画面を閉じてから取り込んでください');
+    return;
+  }
   if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length){ e.preventDefault(); dragDepth=0; $('drophint').classList.remove('on'); handleFiles(e.dataTransfer.files); }
 });
 // グリッドの余白に落としたら末尾へ移動（＝取り込みやコピーではなく移動）
