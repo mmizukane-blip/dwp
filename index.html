@@ -549,6 +549,7 @@ body.nolines .lnsvg{display:none;}
           <label class="cvchk"><input type="checkbox" id="cvAnnots" checked>書き込み（ペン・付箋・ハンコ）も一緒に描く</label>
         </div>
       </div>
+      <div class="cvwarn">⏳ <b>変換中は、この画面を表示したままにしてください。</b>ほかのタブやアプリに切り替えると、ブラウザが図面の描画を止めるため、変換も一時停止します（戻ると続きから再開します）。</div>
     </div>
 
     <!-- DXFのときの設定 -->
@@ -1536,10 +1537,20 @@ async function exportImages(t){
   const many = t.pages.length > 1;
   let done=0, shrunk=0, totalBytes=0;
 
+  // 画面が見えていない間、ブラウザは図面の描画を止める（PDF.jsが画面の更新の合図に合わせて描くため）。
+  // 黙って止まっていると故障に見えるので、止まっていた時間を数えて、戻ってきたときに知らせる。
+  let awayMs=0, awayFrom=(document.visibilityState==='hidden') ? performance.now() : null;
+  const onVis=()=>{
+    if(document.visibilityState==='hidden'){ if(awayFrom==null) awayFrom=performance.now(); return; }
+    if(awayFrom!=null){ awayMs += performance.now()-awayFrom; awayFrom=null; toast('別の画面を見ている間、変換は止まっていました。続きから進めます', 3000); }
+  };
+  document.addEventListener('visibilitychange', onVis);
+  try{
+
   for(let i=0;i<t.pages.length;i++){
     if(cvAbort) break;
     const p = t.pages[i];
-    $('cvstat').textContent = '変換中… ' + (i+1) + ' / ' + t.pages.length + 'ページ';
+    $('cvstat').textContent = '変換中… ' + (i+1) + ' / ' + t.pages.length + 'ページ（この画面を表示したままに）';
     await new Promise(r=>setTimeout(r,0));          // 画面の表示を更新させてから重い処理に入る
 
     const sz = await pagePtSize(p);
@@ -1574,9 +1585,12 @@ async function exportImages(t){
           + '　形式：' + (cvFmt==='png'?'PNG':'JPEG（画質'+Math.round(qual*100)+'%）') + '　解像度：' + dpi + 'dpi';
   if(shrunk) rep += '\n⚠ ' + shrunk + 'ページは大きすぎたため、上限まで解像度を下げました。';
   if(many)   rep += '\n※ ブラウザが「複数のファイルのダウンロード」を尋ねたときは「許可」を選んでください。';
+  if(awayFrom!=null){ awayMs += performance.now()-awayFrom; awayFrom=null; }
+  if(awayMs >= 1000) rep += '\n⏳ この画面を見ていなかった約' + Math.round(awayMs/1000) + '秒間、変換は止まっていました（そのぶん長くかかっています）。';
   $('cvreport').textContent = rep; $('cvreport').classList.add('on');
   $('cvstat').textContent = '';
   toast(done + '個の画像のダウンロードを開始しました');
+  }finally{ document.removeEventListener('visibilitychange', onVis); }
 }
 
 // ==== DXF：切り抜き（クリップ）の判定 =========================================
