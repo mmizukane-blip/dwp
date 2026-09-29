@@ -2033,7 +2033,13 @@ function cvToSjis(text){
 function buildDxf(v, mmPerPt, encMode){
   const out=[];
   const g=(code, val)=>{ out.push(String(code).padStart(3,' ')); out.push(String(val)); };
-  const n=(x)=>x.toFixed(3);
+  // 0.001mm まで丸めたうえで、末尾のゼロを落として容量を減らす（値は変えない）。
+  // 小数点は必ず残す（29667 ではなく 29667.0）。小数点の無い値を実数として受けない読み手への配慮。
+  const n=(x)=>{
+    let t=x.toFixed(3);
+    if(t.indexOf('.')>=0){ t=t.replace(/0+$/,''); if(t.endsWith('.')) t+='0'; }
+    return t;
+  };
   // DXFでは「\」が制御文字の始まりなので必ず二重にする。これは必ず「文字の段階」で行う。
   // （CP932では「表」が 95 5C のように2バイト目が 0x5C になる。バイトにしてから 5C を二重化すると文字が壊れる）
   // 'esc' のときだけ、非ASCIIを \U+XXXX に置き換える（コードポイント単位。絵文字も1文字として扱う）。
@@ -2081,7 +2087,7 @@ function buildDxf(v, mmPerPt, encMode){
   g(0,'SECTION'); g(2,'ENTITIES');
   for(const s of v.segs){
     if(s[0]===s[2] && s[1]===s[3]) continue;                   // 長さゼロの線はCADで邪魔になるので捨てる
-    g(0,'LINE'); g(8,'0'); g(6,'CONTINUOUS');
+    g(0,'LINE'); g(8,'0');                                     // 線種は書かない＝画層の線種（CONTINUOUS）に従う
     g(10,n(X(s[0]))); g(20,n(Y(s[1]))); g(30,'0.0');
     g(11,n(X(s[2]))); g(21,n(Y(s[3]))); g(31,'0.0');
   }

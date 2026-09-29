@@ -7,3 +7,5 @@ tools/scan_survey.txt
 
 # 見本DXF（tools/make_dxf_samples.ps1 で作り直せる）
 tools/dxf_samples/
+
+tools/dxf_variants/

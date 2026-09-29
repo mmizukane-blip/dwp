@@ -180,6 +180,23 @@
       R.push({ 名前:'T24 Shift-JISのDXFを読み戻すと元の文字になる', 判定: ok ? '✅' : '❌',
                期待:'表通り芯（\\U+変換なし・$ACADVERなし）', 結果: val });
     }
+    // T25 容量：線種の行を書かず、数値の末尾ゼロを落とす（値と見た目は変えない）
+    {
+      const CRLF = String.fromCharCode(13,10);
+      const v={segs:[[0,0,100,0],[100,0,100,50]], pageW:200, pageH:100, texts:[{x:10,y:10,h:5,ang:0,wf:1,s:'A'}]};
+      const txt=buildDxf(v, 1, 'sjis');
+      const rows=txt.split(CRLF);
+      const i=rows.indexOf('LINE');
+      const rec=rows.slice(i-1, i+10).join('|');
+      const v10=rows[rows.indexOf(' 10', i)+1];
+      const a=txt.indexOf(CRLF+'  0'+CRLF+'LINE');
+      const b=txt.indexOf(CRLF+'  0'+CRLF, a+8);
+      const per=(a>=0 && b>a) ? (b-a) : -1;
+      const ok = rec.indexOf('CONTINUOUS')<0 && v10==='0.0' && txt.indexOf('.000')<0 && per>0 && per<=100;
+      R.push({ 名前:'T25 1本あたりの容量を削る（線種の省略・末尾ゼロ）', 判定: ok ? '✅' : '❌',
+               期待:'線種の行なし・0.000→0.0・1本100バイト以下',
+               結果:'1本'+per+'バイト / 最初の座標「'+v10+'」/ 線種行'+(rec.indexOf('CONTINUOUS')<0?'なし':'あり') });
+    }
     return R;
   };
 })();
