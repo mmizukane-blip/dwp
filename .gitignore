@@ -4,3 +4,6 @@ tools/scan_survey.txt
 
 # 社内向けの作業まとめ（物件名を含む）も公開しない
 作業まとめ*.html
+
+# 見本DXF（tools/make_dxf_samples.ps1 で作り直せる）
+tools/dxf_samples/

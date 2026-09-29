@@ -149,6 +149,37 @@
       const v = await extractVectors(page, 0, OPT);
       R.push({ 名前:'T21 櫛形の切り抜きで1本の線が200区間に分かれる', 判定: v.segs.length===200 ? '✅' : '❌', 期待:'200本', 結果: v.segs.length+'本' });
     }
+    // --- 文字コード（Shift-JIS / CP932）。期待値は Windows の .NET Encoding 932 で実測した値 ---
+    {
+      const hex=(u8)=>[...u8].map(b=>b.toString(16).toUpperCase().padStart(2,'0')).join(' ');
+      const cases=[['通り芯','92 CA 82 E8 90 63'],['１階','82 50 8A 4B'],['柱','92 8C'],['表','95 5C'],
+                   ['～','81 60'],['①','87 40'],['㈱','87 8A'],['髙','FB FC'],['Ⅳ','87 57'],['ｱ','B1'],['A\\B','41 5C 42']];
+      const bad=[];
+      for(const [s,exp] of cases){ const got=hex(cvToSjis(s).bytes); if(got!==exp) bad.push(s+': 期待 '+exp+' / 結果 '+got); }
+      R.push({ 名前:'T22 CP932のバイト列（重複マッピング・2バイト目が5Cの文字を含む）', 判定: bad.length? '❌' : '✅',
+               期待:'Windowsと同じバイト列', 結果: bad.length? bad.join(' / ') : cases.length+'種すべて一致' });
+    }
+    {
+      // 出せない文字は ? にして数え、形の同じ文字に置き換えられるものは置き換える
+      const r1=cvToSjis('〜');                      // U+301C 波ダッシュ → ～(U+FF5E) 81 60
+      const r2=cvToSjis('あ😀い');                  // 絵文字はCP932に無い → ?（サロゲートペアを1文字として扱えているか）
+      const ok = [...r1.bytes].join()==='129,96' && r1.alt===1 && r1.miss.size===0
+              && [...r2.bytes].join()==='130,160,63,130,162' && r2.miss.get('😀')===1 && r2.miss.size===1;
+      R.push({ 名前:'T23 出せない文字の扱い（置き換え・?・絵文字）', 判定: ok ? '✅' : '❌',
+               期待:'〜→81 60（置換1件）／あ😀い→82 A0 3F 82 A2（?1件）',
+               結果:'〜→'+[...r1.bytes].map(b=>b.toString(16))+'（置換'+r1.alt+'件・不可'+r1.miss.size+'）／あ😀い→'+[...r2.bytes].map(b=>b.toString(16))+'（不可'+r2.miss.size+'）' });
+    }
+    {
+      // DXF全体を Shift-JIS で組み立てたとき、TEXT の値が正しいバイト列になっているか
+      const v={segs:[], pageW:100, pageH:100, texts:[{x:0,y:0,h:10,ang:0,wf:1,s:'表通り芯'}]};
+      const txt=buildDxf(v, 1, 'sjis');
+      const bytes=cvToSjis(txt).bytes;
+      const dec=new TextDecoder('shift_jis').decode(bytes);
+      const L=dec.split('\r\n'); const val=L[L.lastIndexOf('  1')+1];
+      const ok = val==='表通り芯' && !txt.includes('\\U+') && !dec.includes('AC1021');
+      R.push({ 名前:'T24 Shift-JISのDXFを読み戻すと元の文字になる', 判定: ok ? '✅' : '❌',
+               期待:'表通り芯（\\U+変換なし・$ACADVERなし）', 結果: val });
+    }
     return R;
   };
 })();

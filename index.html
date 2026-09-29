@@ -580,10 +580,11 @@ body.nolines .lnsvg{display:none;}
         <div class="cvlbl">文字コード</div>
         <div class="cvbody">
           <div class="cvseg" id="cvEnc">
-            <button data-enc="utf8" class="active">UTF-8（今のCAD向け）</button>
-            <button data-enc="esc">\U+ 変換（古いCAD向け）</button>
+            <button data-enc="sjis" class="active">Shift-JIS（Jw_cad・NETEAGLE）</button>
+            <button data-enc="utf8">UTF-8</button>
+            <button data-enc="esc">\U+ 変換</button>
           </div>
-          <div class="cvnote">開けない・文字化けするときは、もう一方で出し直してください。</div>
+          <div class="cvnote">国内のCAD（Jw_cad・NETEAGLE）はDXFを<b>Shift-JIS</b>として読むので、既定はこれです。文字化けするときは、ほかの2つでも出し直してみてください。</div>
         </div>
       </div>
       <div class="cvwarn">⚠ これは「PDFの見た目の線をDXFに写す」機能です。元のCADデータの復元ではありません。線幅・線種・色・レイヤーは失われ、すべて1つのレイヤーに入ります。</div>
@@ -1406,7 +1407,7 @@ async function printPdf(){
 const CV_DXF_READY = true;
 let cvFmt='jpeg';          // 'jpeg' | 'png' | 'dxf'
 let cvScaleMode='denom';   // 'denom'（縮尺を入力）| 'calib'（2点校正）| 'paper'（用紙原寸）
-let cvEnc='utf8';          // 'utf8' | 'esc'
+let cvEnc='sjis';          // 'sjis'（既定・国内CAD向け）| 'utf8' | 'esc'
 let cvBusy=false;
 let cvAbort=false;         // 変換中に「中止」が押されたか
 let cvCalib=null;          // 2点校正の結果 {mmPerPt, pageUid}
@@ -1971,17 +1972,66 @@ async function extractVectors(page, rotation, opt){
   return {segs, texts, st, tst, pageW:W, pageH:H};
 }
 
+// ==== DXF：Shift-JIS(CP932) への変換 =========================================
+// Jw_cad も NETEAGLE も、DXFを CP932 として読む（Jw_cad自身のヘッダ雛形 DXF_HDR.dat も、
+// 取引先から届くDXFも CP932）。ブラウザの TextEncoder は UTF-8 しか出せないので、
+// TextDecoder('shift_jis') で「バイト列→文字」を総当たりして、その逆引き表を作る。
+let cvSjisMap = null;
+function cvSjisTable(){
+  if(cvSjisMap) return cvSjisMap;
+  const dec = new TextDecoder('shift_jis');
+  const m = new Map();
+  // 同じ文字が2か所にある（NEC選定IBM拡張 0xED–0xEE と IBM拡張 0xFA–0xFC）。
+  // Windowsは後者を使うので、0xFA–0xFC が来たら上書きする（例：髙 は FB FC）。
+  const put=(s,b)=>{ const cur=m.get(s); if(!cur || (cur[0]>=0xED && cur[0]<=0xEE && b[0]>=0xFA)) m.set(s,b); };
+  for(let b=0;b<0x80;b++) put(String.fromCharCode(b), [b]);              // ASCII（0x5C は \ のまま）
+  const one=new Uint8Array(1);
+  for(let b=0xA1;b<=0xDF;b++){ one[0]=b; const s=dec.decode(one); if(s.length===1 && s!=='�') put(s,[b]); }   // 半角カナ
+  const two=new Uint8Array(2);
+  for(const [lo,hi] of [[0x81,0x9F],[0xE0,0xFC]]){
+    for(let b1=lo;b1<=hi;b1++){
+      for(let b2=0x40;b2<=0xFC;b2++){
+        if(b2===0x7F) continue;
+        two[0]=b1; two[1]=b2;
+        const s=dec.decode(two);
+        if(s.length===1 && s!=='�') put(s,[b1,b2]);
+      }
+    }
+  }
+  cvSjisMap = m; return m;
+}
+// CP932に無い文字のうち、見た目が同じ文字に置き換えて差し支えないもの（Windowsは ? にしてしまう）
+const CV_SJIS_ALT = {'〜':'～', '−':'－', '‾':'￣', '‖':'∥', '¥':'￥'};
+// 文字列を CP932 のバイト列にする。出せない文字は ? にして、何が何個だったかを返す
+function cvToSjis(text){
+  const m=cvSjisTable(), out=[], miss=new Map(); let alt=0;
+  for(const ch of text){                                                  // コードポイント単位（絵文字も1文字として扱う）
+    let b=m.get(ch);
+    if(!b && CV_SJIS_ALT[ch]){ const b2=m.get(CV_SJIS_ALT[ch]); if(b2){ b=b2; alt++; } }
+    if(!b){ miss.set(ch,(miss.get(ch)||0)+1); out.push(0x3F); continue; }
+    for(const x of b) out.push(x);
+  }
+  return {bytes:new Uint8Array(out), miss, alt};
+}
+
 // --- 取り出した線と文字を、CADが読めるASCII DXFの文字列に組み立てる ---
 // 相手先から実際に届くDXFに合わせ、LINEとTEXTだけの素直な形にする。
 function buildDxf(v, mmPerPt, encMode){
   const out=[];
   const g=(code, val)=>{ out.push(String(code).padStart(3,' ')); out.push(String(val)); };
   const n=(x)=>x.toFixed(3);
-  // DXFでは「\」が制御文字の始まりなので必ず二重にする。旧CAD向けは非ASCIIを \U+XXXX に置き換える。
+  // DXFでは「\」が制御文字の始まりなので必ず二重にする。これは必ず「文字の段階」で行う。
+  // （CP932では「表」が 95 5C のように2バイト目が 0x5C になる。バイトにしてから 5C を二重化すると文字が壊れる）
+  // 'esc' のときだけ、非ASCIIを \U+XXXX に置き換える（コードポイント単位。絵文字も1文字として扱う）。
   const enc=(s)=>{
-    let t = String(s).replace(/\r|\n/g,' ').replace(/\\/g,'\\\\');
-    if(encMode!=='utf8') t = t.replace(/[^\x20-\x7E]/g, ch=>'\\U+'+ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0'));
-    return t;
+    const t = String(s).replace(/\r|\n/g,' ').replace(/\\/g,'\\\\');
+    if(encMode!=='esc') return t;
+    let r='';
+    for(const ch of t){
+      const cp=ch.codePointAt(0);
+      r += (cp>=0x20 && cp<=0x7E) ? ch : '\\U+'+cp.toString(16).toUpperCase().padStart(4,'0');
+    }
+    return r;
   };
   const X=(x)=>x*mmPerPt, Y=(y)=>y*mmPerPt;
 
@@ -2059,7 +2109,8 @@ async function exportDxf(t){
   }
 
   const many = pdfPages.length>1;
-  let done=0, nSeg=0, nText=0;
+  let done=0, nSeg=0, nText=0, sumAlt=0;
+  const sumMiss=new Map();                                      // Shift-JISで出せなかった文字と、その個数
   const sum={curve:0, curveCapped:0, fillPath:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
              vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0};
 
@@ -2083,7 +2134,15 @@ async function exportDxf(t){
     else if(!v.segs.length && v.texts.length) sum.textOnly++;      // 線が無く文字だけ＝スキャン＋OCR文字のPDF
 
     const txt = buildDxf(v, mmPerUnit, cvEnc);
-    const blob = new Blob([txt], {type:'application/dxf'});     // 文字列を渡すとUTF-8で書き出される
+    let blob;
+    if(cvEnc==='sjis'){                                         // Jw_cad・NETEAGLE 向け：CP932のバイト列で保存する
+      const r = cvToSjis(txt);
+      sumAlt += r.alt;
+      for(const [c,k] of r.miss) sumMiss.set(c, (sumMiss.get(c)||0)+k);
+      blob = new Blob([r.bytes], {type:'application/dxf'});
+    }else{
+      blob = new Blob([txt], {type:'application/dxf'});          // 文字列を渡すとUTF-8で書き出される
+    }
     const num = many ? ('_P'+String(i+1).padStart(2,'0')) : '';
     downloadBlob(blob, t.name + num + '.dxf');
     done++;
@@ -2095,7 +2154,8 @@ async function exportDxf(t){
                  : ('1/'+(parseFloat($('cvDenom').value)||100)+' として換算');
   let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ')+done+'個のDXFのダウンロードを開始しました\n'
           + '　線（LINE）：'+nSeg.toLocaleString()+'本　文字（TEXT）：'+nText.toLocaleString()+'個\n'
-          + '　実寸の決め方：'+scaleTxt+'　単位：mm　文字コード：'+(cvEnc==='utf8'?'UTF-8':'\\U+変換')+'\n';
+          + '　実寸の決め方：'+scaleTxt+'　単位：mm　文字コード：'
+          + (cvEnc==='sjis'?'Shift-JIS':(cvEnc==='utf8'?'UTF-8':'\\U+変換'))+'\n';
   const w=[];
   if(sum.empty)    w.push('・'+sum.empty+'ページは線が1本も取れませんでした（スキャン画像のPDFと思われます）');
   if(sum.textOnly) w.push('⚠ '+sum.textOnly+'ページは線が取れず、文字だけになりました。スキャン図面に文字読み取り（OCR）の結果が埋まっているPDFです。図形は入っていません');
@@ -2109,6 +2169,12 @@ async function exportDxf(t){
   }
   if(sum.clipped)  w.push('・切り抜き（PDFで隠れている範囲）や用紙の外にはみ出した線 '+sum.clipped.toLocaleString()+'本を、見えている部分だけに切り詰めました');
   if(sum.textOut)  w.push('・用紙の外にある文字 '+sum.textOut+'個は出していません');
+  if(sumAlt)       w.push('・Shift-JISに無い記号 '+sumAlt+'個を、形の同じ文字に置き換えました（例：〜→～）');
+  if(sumMiss.size){
+    const list=[...sumMiss.entries()].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([c,k])=>'「'+c+'」×'+k).join('　');
+    w.push('⚠ Shift-JISで出せない文字を「?」にしました：'+list+([...sumMiss.keys()].length>10?' ほか':'')
+         + '　→ その文字が必要なら、文字コードを「UTF-8」に変えてお試しください');
+  }
   if(sum.uuPages)  w.push('・座標の倍率（UserUnit）が1でないページ '+sum.uuPages+'枚は、その倍率を寸法に反映しました');
   if(sum.textPath) w.push('・文字の字形として描かれた図形 '+sum.textPath+'個は除きました');
   if(sum.shading)  w.push('・グラデーション '+sum.shading+'個は出せません');
