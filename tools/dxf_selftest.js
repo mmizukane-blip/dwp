@@ -183,7 +183,7 @@
     // T25 容量：線種の行を書かず、数値の末尾ゼロを落とす（値と見た目は変えない）
     {
       const CRLF = String.fromCharCode(13,10);
-      const v={segs:[[0,0,100,0],[100,0,100,50]], pageW:200, pageH:100, texts:[{x:10,y:10,h:5,ang:0,wf:1,s:'A'}]};
+      const v={segs:[[0,0,100,0],[150,50,200,50]], pageW:200, pageH:100, texts:[{x:10,y:10,h:5,ang:0,wf:1,s:'A'}]};
       const txt=buildDxf(v, 1, 'sjis');
       const rows=txt.split(CRLF);
       const i=rows.indexOf('LINE');
@@ -192,10 +192,62 @@
       const a=txt.indexOf(CRLF+'  0'+CRLF+'LINE');
       const b=txt.indexOf(CRLF+'  0'+CRLF, a+8);
       const per=(a>=0 && b>a) ? (b-a) : -1;
-      const ok = rec.indexOf('CONTINUOUS')<0 && v10==='0.0' && txt.indexOf('.000')<0 && per>0 && per<=100;
+      const ok = rec.indexOf('CONTINUOUS')<0 && rec.indexOf(' 30')<0 && v10==='0.0' && txt.indexOf('.000')<0 && per>0 && per<=100;
       R.push({ 名前:'T25 1本あたりの容量を削る（線種の省略・末尾ゼロ）', 判定: ok ? '✅' : '❌',
-               期待:'線種の行なし・0.000→0.0・1本100バイト以下',
+               期待:'線種の行なし・Z座標なし・0.000→0.0・1本100バイト以下',
                結果:'1本'+per+'バイト / 最初の座標「'+v10+'」/ 線種行'+(rec.indexOf('CONTINUOUS')<0?'なし':'あり') });
+    }
+    // --- 線をまとめる（LWPOLYLINE）。DXFを読み戻して、元の線分と1本残らず一致するかで確かめる ---
+    const parseDxf=(txt)=>{
+      const rows=txt.split(String.fromCharCode(13,10));
+      const ents=[]; let cur=null;
+      for(let i=rows.indexOf('ENTITIES')+1; i<rows.length-1; i+=2){
+        const code=rows[i].trim(), val=rows[i+1];
+        if(code==='0'){ if(cur) ents.push(cur); if(val==='ENDSEC'){ cur=null; break; } cur={type:val, g:[]}; continue; }
+        if(cur) cur.g.push([code,val]);
+      }
+      const segs=[]; let nLine=0, nPoly=0; const closed=[];
+      for(const e of ents){
+        if(e.type==='LINE'){ nLine++; const m={}; for(const [c,v] of e.g) m[c]=v;
+          segs.push([+m['10'],+m['20'],+m['11'],+m['21']]); }
+        if(e.type==='LWPOLYLINE'){ nPoly++; const pts=[]; let cl=0, x=null;
+          for(const [c,v] of e.g){ if(c==='70') cl=+v; if(c==='10') x=+v; if(c==='20') pts.push([x,+v]); }
+          closed.push(cl);
+          for(let k=0;k<pts.length-1;k++) segs.push([pts[k][0],pts[k][1],pts[k+1][0],pts[k+1][1]]);
+          if(cl) segs.push([pts[pts.length-1][0],pts[pts.length-1][1],pts[0][0],pts[0][1]]); }
+      }
+      return {segs, nLine, nPoly, closed, hasZ: rows.slice(rows.indexOf('ENTITIES')).some(r=>r===' 30'||r===' 31')};
+    };
+    const key=(a)=>a.map(s=>s.map(v=>(+v).toFixed(3)).join(',')).join(' | ');
+    {
+      const zig=[]; for(let k=0;k<10;k++) zig.push([k*10,(k%2)*5,(k+1)*10,((k+1)%2)*5]);        // 10本つながった折れ線
+      const rect=[[120,0,170,0],[170,0,170,30],[170,30,120,30],[120,30,120,0]];                // 閉じた四角形（折れ線の終点(100,0)とはつながらない位置）
+      const two=[[300,0,310,0],[310,0,310,10]];                                                 // 2本だけのつながり
+      const lone=[[400,0,450,0],[400,50,450,60]];                                               // 離れた線
+      const src=[...zig, ...rect, ...two, ...lone];
+      const txt=buildDxf({segs:src, texts:[], pageW:500, pageH:100}, 1, 'sjis');
+      const r=parseDxf(txt);
+      const same = key(r.segs)===key(src);
+      const ok = same && r.nPoly===2 && r.closed.join()==='0,1' && r.nLine===4 && !r.hasZ;
+      R.push({ 名前:'T26 つながった線をポリラインにまとめても、読み戻すと元の線分と一致', 判定: ok ? '✅' : '❌',
+               期待:'線分が完全一致・ポリライン2個（開1・閉1）・LINE4本（2本のつながり＋離れた2本）・Zなし',
+               結果:(same?'一致':'不一致')+' / ポリライン'+r.nPoly+'個（閉じ '+r.closed.join()+'）/ LINE'+r.nLine+'本 / Z'+(r.hasZ?'あり':'なし') });
+    }
+    {
+      // 丸めて -0.0 になる点でもつながる（-0.0 と 0.0 をそろえる）
+      const src=[[10,0,-0.0004,0],[0.0003,0,0,10],[0,10,10,10],[10,10,20,10]];
+      const txt=buildDxf({segs:src, texts:[], pageW:100, pageH:100}, 1, 'sjis');
+      const r=parseDxf(txt);
+      const ok = r.nPoly===1 && r.nLine===0 && txt.indexOf('-0.0')<0;
+      R.push({ 名前:'T27 丸めて -0.0 になる点も同じ点としてつながる', 判定: ok ? '✅' : '❌',
+               期待:'ポリライン1個・「-0.0」なし', 結果:'ポリライン'+r.nPoly+'個・LINE'+r.nLine+'本・「-0.0」'+(txt.indexOf('-0.0')<0?'なし':'あり') });
+    }
+    {
+      // 丸めた後に長さがゼロになる線は出さない
+      const src=[[5.0001,5,5.0004,5],[0,0,10,0]];
+      const r=parseDxf(buildDxf({segs:src, texts:[], pageW:100, pageH:100}, 1, 'sjis'));
+      const ok = r.nLine===1 && r.nPoly===0 && key(r.segs)===key([[0,0,10,0]]);
+      R.push({ 名前:'T28 丸めると長さゼロになる線は出さない', 判定: ok ? '✅' : '❌', 期待:'LINE1本だけ', 結果:'LINE'+r.nLine+'本・ポリライン'+r.nPoly+'個' });
     }
     return R;
   };

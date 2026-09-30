@@ -2038,6 +2038,7 @@ function buildDxf(v, mmPerPt, encMode){
   const n=(x)=>{
     let t=x.toFixed(3);
     if(t.indexOf('.')>=0){ t=t.replace(/0+$/,''); if(t.endsWith('.')) t+='0'; }
+    if(t==='-0.0') t='0.0';                                    // 丸めて -0.0 になった値は 0.0 にそろえる（同じ点なのにつながらなくなるため）
     return t;
   };
   // DXFでは「\」が制御文字の始まりなので必ず二重にする。これは必ず「文字の段階」で行う。
@@ -2085,12 +2086,38 @@ function buildDxf(v, mmPerPt, encMode){
   g(0,'ENDSEC');
 
   g(0,'SECTION'); g(2,'ENTITIES');
+  // --- 線：つながった線分を LWPOLYLINE にまとめる（Jw_cad・NETEAGLE で読めることを確認済み） ---
+  // ・出力する文字列（0.001に丸めた値）で「前の終点＝次の始点」を比べる。つなぐことで位置が動くことはない
+  // ・出力の順に並んだ線分だけを見る（離れた線を探して並べ替えない）。曲線を分けた線はこの順で並んでいる
+  // ・まとめたほうが小さくなるときだけまとめる（2本程度ではLINEのほうが小さいことがある）
+  // ・線のZ座標（30/31）は書かない。平面図なので常に0（Jw_cad・NETEAGLE で確認済み）
+  const lst={line:0, poly:0, polySegs:0};
+  const chains=[]; let chain=null;
   for(const s of v.segs){
-    if(s[0]===s[2] && s[1]===s[3]) continue;                   // 長さゼロの線はCADで邪魔になるので捨てる
-    g(0,'LINE'); g(8,'0');                                     // 線種は書かない＝画層の線種（CONTINUOUS）に従う
-    g(10,n(X(s[0]))); g(20,n(Y(s[1]))); g(30,'0.0');
-    g(11,n(X(s[2]))); g(21,n(Y(s[3]))); g(31,'0.0');
+    const a=[n(X(s[0])), n(Y(s[1]))], b=[n(X(s[2])), n(Y(s[3]))];
+    if(a[0]===b[0] && a[1]===b[1]) continue;                   // 丸めた後に長さゼロになる線も捨てる
+    const last = chain ? chain[chain.length-1] : null;
+    if(last && last[0]===a[0] && last[1]===a[1]) chain.push(b);
+    else { if(chain) chains.push(chain); chain=[a,b]; }
   }
+  if(chain) chains.push(chain);
+  const pair=(val)=>7+String(val).length;                       // 「3文字のコード＋改行＋値＋改行」のバイト数
+  const lineBytes=(p,q)=>pair('LINE')+pair('0')+pair(p[0])+pair(p[1])+pair(q[0])+pair(q[1]);
+  const emitLine=(p,q)=>{ g(0,'LINE'); g(8,'0'); g(10,p[0]); g(20,p[1]); g(11,q[0]); g(21,q[1]); lst.line++; };
+  for(const c of chains){
+    if(c.length===2){ emitLine(c[0],c[1]); continue; }
+    let pts=c, closed=0;
+    // 最後の点が最初の点と同じなら閉じた輪郭にする（違う点が3つ以上あるときだけ。行って戻るだけの形は閉じない）
+    if(c.length>=4 && c[0][0]===c[c.length-1][0] && c[0][1]===c[c.length-1][1]){ pts=c.slice(0,-1); closed=1; }
+    let pb=pair('LWPOLYLINE')+pair('0')+pair('AcDbPolyline')+pair(pts.length)+pair(closed);
+    for(const p of pts) pb+=pair(p[0])+pair(p[1]);
+    let lb=0; for(let i=0;i<c.length-1;i++) lb+=lineBytes(c[i],c[i+1]);
+    if(pb>=lb){ for(let i=0;i<c.length-1;i++) emitLine(c[i],c[i+1]); continue; }
+    g(0,'LWPOLYLINE'); g(8,'0'); g(100,'AcDbPolyline'); g(90,pts.length); g(70,closed);
+    for(const p of pts){ g(10,p[0]); g(20,p[1]); }
+    lst.poly++; lst.polySegs+=c.length-1;
+  }
+  buildDxf.stats=lst;                                            // 呼び出し側のレポート用
   for(const t of v.texts){
     const h=Y(t.h); if(!(h>0)) continue;
     g(0,'TEXT'); g(8,'TEXT'); g(7,'STANDARD');
@@ -2129,7 +2156,7 @@ async function exportDxf(t){
   }
 
   const many = pdfPages.length>1;
-  let done=0, nSeg=0, nText=0, sumAlt=0;
+  let done=0, nSeg=0, nText=0, sumAlt=0, nPoly=0, nPolySegs=0;
   const sumMiss=new Map();                                      // Shift-JISで出せなかった文字と、その個数
   const sum={curve:0, curveCapped:0, fillPath:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
              vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0};
@@ -2153,7 +2180,7 @@ async function exportDxf(t){
     if(!v.segs.length && !v.texts.length) sum.empty++;
     else if(!v.segs.length && v.texts.length) sum.textOnly++;      // 線が無く文字だけ＝スキャン＋OCR文字のPDF
 
-    const txt = buildDxf(v, mmPerUnit, cvEnc);
+    const txt = buildDxf(v, mmPerUnit, cvEnc);  nPoly += buildDxf.stats.poly; nPolySegs += buildDxf.stats.polySegs;
     let blob;
     if(cvEnc==='sjis'){                                         // Jw_cad・NETEAGLE 向け：CP932のバイト列で保存する
       const r = cvToSjis(txt);
@@ -2173,7 +2200,7 @@ async function exportDxf(t){
                  : (cvScaleMode==='paper') ? '用紙の原寸（1/1）'
                  : ('1/'+(parseFloat($('cvDenom').value)||100)+' として換算');
   let rep = (cvAbort ? '⏹ 途中で止めました。' : '✅ ')+done+'個のDXFのダウンロードを開始しました\n'
-          + '　線（LINE）：'+nSeg.toLocaleString()+'本　文字（TEXT）：'+nText.toLocaleString()+'個\n'
+          + '　線：'+nSeg.toLocaleString()+'本'+(nPoly ? '（うちつながった'+nPolySegs.toLocaleString()+'本を'+nPoly.toLocaleString()+'個のポリラインにまとめて容量を節約）' : '')+'　文字（TEXT）：'+nText.toLocaleString()+'個\n'
           + '　実寸の決め方：'+scaleTxt+'　単位：mm　文字コード：'
           + (cvEnc==='sjis'?'Shift-JIS':(cvEnc==='utf8'?'UTF-8':'\\U+変換'))+'\n';
   const w=[];
