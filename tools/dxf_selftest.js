@@ -312,6 +312,32 @@
       const inn=cvQuadHitsRect(q, [4,4,8,8]);                 // こちらは文字の四角形に掛かる
       R.push({ 名前:'T38 回転した文字は文字の四角形そのもので範囲と比べる', 判定: (!out && inn) ? '✅' : '❌', 期待:'外れ・掛かる', 結果:(out?'掛かる':'外れ')+'・'+(inn?'掛かる':'外れ') });
     }
+    // --- 1文字ずつの文字を、同じ行の文字列にまとめる（tools/prompts/dxf_text_merge.md） ---
+    // 文字を1つずつ、ちょうど字送りの位置に置いたPDFを作る（CADから出たPDFと同じ形）
+    const charPage=async (runs)=>{
+      const doc=await PDFDocument.create(); const page=doc.addPage([500,500]);
+      const fonts={H:await doc.embedFont(StandardFonts.Helvetica), T:await doc.embedFont(StandardFonts.TimesRoman)};
+      for(const r of runs){ let x=r.x; const f=fonts[r.f||'H'];
+        for(const ch of r.s){ page.drawText(ch,{x, y:r.y, size:10, font:f}); x+=f.widthOfTextAtSize(ch,10); } }
+      const pdf=await pdfjsLib.getDocument(Object.assign({data:await doc.save()}, PDFJS_OPTS)).promise;
+      return pdf.getPage(1);
+    };
+    const TXT=Object.assign({}, OPT, {text:true, textMerge:true});
+    const textCase=async (name, runs, extra, expected, check)=>{
+      const page=await charPage(runs);
+      const v=await extractVectors(page, 0, Object.assign({}, TXT, extra||{}));
+      const got=v.texts.map(t=>t.s).sort().join(' | ');
+      const ok = got===expected.slice().sort().join(' | ') && (!check || check(v));
+      R.push({ 名前:name, 判定: ok?'✅':'❌', 期待:expected.join(' | '), 結果:got+'（まとめ'+v.tst.merged+'・除外'+v.tst.out+'）' });
+    };
+    await textCase('T39 1文字ずつ置いた文字は文字列にまとめ、離れた文字は別にする',
+      [{s:'ABC', x:100, y:100}, {s:'X', x:200, y:100}], null, ['ABC','X'], v=>v.texts.find(t=>t.s==='ABC').x===100);
+    await textCase('T40 範囲の外の文字はつながらない（範囲の中の文字だけでまとめる）',
+      [{s:'ABC', x:90, y:100}], {crop:[100,50,300,150]}, ['BC'], v=>v.tst.out===1);
+    await textCase('T41 文字の間の空白は残す',
+      [{s:'A B', x:100, y:100}], null, ['A B']);
+    await textCase('T42 フォントが違う文字はつながない',
+      [{s:'A', x:100, y:100, f:'H'}, {s:'B', x:100+6.67, y:100, f:'T'}], null, ['A','B']);
     return R;
   };
 })();

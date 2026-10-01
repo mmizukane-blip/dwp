@@ -582,6 +582,7 @@ body.nolines .lnsvg{display:none;}
         <div class="cvlbl">出すもの</div>
         <div class="cvbody">
           <label class="cvchk"><input type="checkbox" id="cvDxfText" checked>文字を TEXT として出す</label>
+          <label class="cvchk" style="margin-left:22px;"><input type="checkbox" id="cvDxfTextMerge" checked>1文字ずつの文字を、同じ行の文字列にまとめる</label>
           <label class="cvchk"><input type="checkbox" id="cvDxfCurve" checked>曲線・円弧を細かい線に分けて出す</label>
           <label class="cvchk"><input type="checkbox" id="cvDxfFill" checked>塗りつぶしの形も線として出す（ほかの線と重なる部分は省く）</label>
           <div class="cvnote">許容誤差 <input type="number" id="cvTol" value="1" min="0.02" max="5" step="0.02"> mm（実寸。曲線を線に分けるときの粗さ。1/100の図面なら1mmで紙の上0.01mm）</div>
@@ -2052,34 +2053,74 @@ async function extractVectors(page, rotation, opt){
   }
 
   // --- 文字 ---
-  const texts=[]; const tst={vertical:0, skew:0, wide:0, out:0};
+  const texts=[]; const tst={vertical:0, skew:0, wide:0, out:0, merged:0};
   if(opt.text && !st.aborted){
     try{
       const tc = await page.getTextContent();
       if(cvAbort){ st.aborted=true; tc.items.length=0; }          // 文字の取得中に「中止」が押された
+      // 1文字（PDF.jsが返す1かたまり）ずつの情報にする。空白だけの文字も、文字列の中の空白として残すため捨てない
+      const items=[];
       for(const it of tc.items){
-        if(!it.str || !it.str.trim()) continue;
-        const tr = it.transform;
-        const hx = Math.hypot(tr[0], tr[1]);        // 横方向の伸び
-        const hy = Math.hypot(tr[2], tr[3]);        // 文字の高さ
+        if(typeof it.str!=='string' || !it.str.length) continue;
+        const tr=it.transform, hx=Math.hypot(tr[0],tr[1]), hy=Math.hypot(tr[2],tr[3]);
         if(!(hy>0)) continue;
-        // 用紙（と、選んだ範囲）の外の文字は出さない。挿入点1つではなく文字の四角形そのもので見て、一部でも掛かれば残す（欠落のほうが危険なため）。
+        const ux=hx>0?tr[0]/hx:1, uy=hx>0?tr[1]/hx:0, vx=tr[2]/hy, vy=tr[3]/hy;
+        const w=it.width||0, h=it.height||hy, blank=!it.str.trim();
+        const skew=Math.abs(tr[0]*tr[2]+tr[1]*tr[3]) > 0.02*hx*hy;   // 斜体・ゆがみ
+        // 用紙（と、選んだ範囲）の外の文字は出さない。文字の四角形そのもので見て、一部でも掛かれば残す（欠落のほうが危険なため）。
+        // 判定は、まとめる前に1文字ずつ行う（範囲の外の文字が、まとめた文字列に紛れ込まないように）。
         // なお PDF.js 3.11 の getTextContent 自体も用紙外の文字を1文字単位で落とす（実測）ので、用紙の判定は二重の保険。
         // getTextContent からは切り抜きの状態が分からないため、PDFの切り抜きの外の文字までは除けない。
-        const w=it.width||0, h=it.height||hy;
-        const ux=hx>0?tr[0]/hx:1, uy=hx>0?tr[1]/hx:0, vx=tr[2]/hy, vy=tr[3]/hy;
-        const cs=[[0,0],[w,0],[w,h],[0,h]].map(([p,q])=>toPage(tr[4]+ux*p+vx*q, tr[5]+uy*p+vy*q));   // 文字の四角形（周の順）
-        if(!cvQuadHitsRect(cs, [0,0,W,H]) || (opt.crop && !cvQuadHitsRect(cs, opt.crop))){ tst.out++; continue; }
-        const ins = toPage(tr[4], tr[5]);           // 挿入点＝ベースラインの左端
-        let ang = Math.atan2(tr[1], tr[0]) * 180/Math.PI - r;
+        let inside=true;
+        if(!blank){
+          const cs=[[0,0],[w,0],[w,h],[0,h]].map(([p,q])=>toPage(tr[4]+ux*p+vx*q, tr[5]+uy*p+vy*q));   // 文字の四角形（周の順）
+          inside = cvQuadHitsRect(cs, [0,0,W,H]) && !(opt.crop && !cvQuadHitsRect(cs, opt.crop));
+          if(!inside) tst.out++;
+        }
+        items.push({it, tr, hx, hy, ux, uy, w, blank, skew, inside, ang:Math.atan2(tr[1],tr[0]), wf:(hx>0? hx/hy : 1)});
+      }
+      // PDFで1文字ずつ置かれた文字を、同じ行の文字列にまとめる。CADから出たPDFは1文字ずつのことが多く、
+      // そのままでは文字が細切れで数も多い（XSTARで重くなる一因。Jw_cadのDXFは文字列でまとまっている）。
+      // 誤ってつながないよう慎重な条件にしている（tools/prompts/dxf_text_merge.md）：
+      // PDFの並び順で隣どうし・同じフォント・左から右の横書き・斜体でない・行末でない・
+      // 回転と高さと幅係数がそろう・基線のずれ≦高さ×0.1・すき間が −0.3〜0.1（×高さ）
+      const canJoin=(L,c)=>{
+        if(!opt.textMerge || L.it.hasEOL) return false;
+        const ltr=(d)=>d!=='rtl' && d!=='ttb';
+        if(!ltr(L.it.dir) || !ltr(c.it.dir) || L.skew || c.skew || L.it.fontName!==c.it.fontName) return false;
+        // PDF.js は離れた文字のすき間を、幅の広い空白の文字として補って返す。それをつなぐと遠くの文字までつながるので、
+        // 空白は「空白の数 × 高さ×1.1」までの幅のものだけ（全角の空白まで）を文字列の中の空白として認める
+        if(c.blank && c.w > c.it.str.length*1.1*c.hy) return false;
+        const da=Math.abs(Math.atan2(Math.sin(c.ang-L.ang), Math.cos(c.ang-L.ang)));
+        if(da>=0.02 || Math.abs(c.hy-L.hy)>0.1*L.hy || Math.abs(c.wf-L.wf)>0.05*L.wf) return false;
+        const ex=L.tr[4]+L.ux*L.w, ey=L.tr[5]+L.uy*L.w, dx=c.tr[4]-ex, dy=c.tr[5]-ey;   // 直前の文字の終わりから見た位置
+        const along=dx*L.ux+dy*L.uy, perp=Math.abs(dy*L.ux-dx*L.uy);
+        return perp<=0.1*L.hy && along>=-0.3*L.hy && along<=0.1*L.hy;
+      };
+      const groups=[]; let g=null;
+      const flush=()=>{ if(g){ g.s=g.s.trimEnd(); if(g.s) groups.push(g); } g=null; };
+      for(const c of items){
+        if(!c.inside){ flush(); continue; }                     // 範囲の外の文字のところで切る
+        if(g && canJoin(g.last, c)){ g.s+=c.it.str; g.last=c; continue; }
+        flush();
+        if(c.blank) continue;                                   // 空白から文字列を始めない
+        g={s:c.it.str, first:c, last:c};
+      }
+      flush();
+      tst.merged = items.filter(c=>!c.blank && c.inside).length - groups.length;
+      // 挿入点・高さ・回転・幅係数は先頭の文字のものを使う（位置合わせのフィットは、受け側CADが読める保証が無いので使わない）
+      for(const gr of groups){
+        const f=gr.first, tr=f.tr;
+        const ins = toPage(tr[4], tr[5]);                       // 挿入点＝ベースラインの左端
+        let ang = f.ang*180/Math.PI - r;
         ang = ((ang%360)+360)%360;
-        if(it.dir === 'ttb') tst.vertical++;
-        if(Math.abs(tr[0]*tr[2] + tr[1]*tr[3]) > 0.02*hx*hy) tst.skew++;   // 斜体・ゆがみ
+        if(f.it.dir === 'ttb') tst.vertical++;
+        if(f.skew) tst.skew++;
         // 横の伸び（幅係数）。スキャンPDFに埋まったOCR文字は極端に引き伸ばされていることがあり、
         // そのまま出すとCADで文字が壊れて見えるため、常識的な範囲を外れたら等倍に戻す。
-        let wf = (hx>0) ? hx/hy : 1;
+        let wf = f.wf;
         if(!(wf>0.25 && wf<4)){ tst.wide++; wf = 1; }
-        texts.push({x:ins[0], y:ins[1], h:hy, ang, wf, s:it.str});
+        texts.push({x:ins[0], y:ins[1], h:f.hy, ang, wf, s:gr.s.trimStart()});
       }
     }catch(e){ console.error(e); }
   }
@@ -2236,6 +2277,7 @@ function buildDxf(v, mmPerPt, encMode){
 async function exportDxf(t){
   const opt = {
     text:  $('cvDxfText').checked,
+    textMerge: $('cvDxfTextMerge').checked,
     curve: $('cvDxfCurve').checked,
     fill:  $('cvDxfFill').checked,
     tol:   Math.max(0.02, parseFloat($('cvTol').value)||1),
@@ -2274,7 +2316,7 @@ async function exportDxf(t){
   let done=0, nSeg=0, nText=0, sumAlt=0, nPoly=0, nPolySegs=0;
   const sumMiss=new Map();                                      // Shift-JISで出せなかった文字と、その個数
   const sum={curve:0, curveCapped:0, fillPath:0, fillAdded:0, fillDup:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
-             vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0, cropped:0, cropEmpty:0};
+             vertical:0, skew:0, wide:0, textOut:0, textMerged:0, empty:0, textOnly:0, uuPages:0, cropped:0, cropEmpty:0};
 
   for(let i=0;i<pdfPages.length;i++){
     if(cvAbort) break;
@@ -2292,7 +2334,7 @@ async function exportDxf(t){
     nSeg += v.segs.length; nText += v.texts.length;
     for(const k of ['curve','curveCapped','fillPath','fillAdded','fillDup','clip','clipped','image','textPath','shading']) sum[k]+=v.st[k];
     if(v.st.cut) sum.cut=true;
-    sum.vertical+=v.tst.vertical; sum.skew+=v.tst.skew; sum.wide+=v.tst.wide; sum.textOut+=v.tst.out;
+    sum.vertical+=v.tst.vertical; sum.skew+=v.tst.skew; sum.wide+=v.tst.wide; sum.textOut+=v.tst.out; sum.textMerged+=v.tst.merged;
     if(!v.segs.length && !v.texts.length) sum.empty++;
     else if(!v.segs.length && v.texts.length) sum.textOnly++;      // 線が無く文字だけ＝スキャン＋OCR文字のPDF
 
@@ -2333,6 +2375,7 @@ async function exportDxf(t){
   }
   if(sum.clipped)  w.push('・'+(sum.cropped?'選んだ範囲・':'')+'切り抜き（PDFで隠れている範囲）・用紙の外にはみ出した線 '+sum.clipped.toLocaleString()+'本を、内側の部分だけに切り詰めました');
   if(sum.textOut)  w.push('・用紙の外にある文字 '+sum.textOut+'個は出していません');
+  if(sum.textMerged) w.push('・PDFで1文字ずつ置かれた文字を同じ行の文字列にまとめ、文字（TEXT）を '+sum.textMerged.toLocaleString()+'個減らしました（CADでは文字列の後ろのほうが少しずれることがあります）');
   if(sumAlt)       w.push('・Shift-JISに無い記号 '+sumAlt+'個を、形の同じ文字に置き換えました（例：〜→～）');
   if(sumMiss.size){
     const list=[...sumMiss.entries()].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([c,k])=>'「'+c+'」×'+k).join('　');
