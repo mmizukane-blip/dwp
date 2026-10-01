@@ -284,6 +284,34 @@
       R.push({ 名前:'T33 線と塗りの境目ではポリラインにつながない', 判定: ok?'✅':'❌', 期待:'境目=1・線は単独のLINE・読み戻して一致',
                結果:'境目='+v.breakAt+'・線'+(lone?'単独':'つながった')+'・LINE'+r.nLine+'本／ポリライン'+r.nPoly+'個' });
     }
+    // --- 範囲を選んで出す（tools/prompts/dxf_crop.md） ---
+    const cropCase=async (name, pageOpts, crop, expected, extra)=>{
+      const { page } = await makePage(pageOpts);
+      const v = await extractVectors(page, 0, Object.assign({}, OPT, {crop}, extra||{}));
+      const got=norm(v.segs), exp=norm(expected);
+      R.push({ 名前:name, 判定: got===exp ? '✅' : '❌', 期待:exp, 結果:got });
+    };
+    await cropCase('T34 範囲をまたぐ線は範囲の辺で切り、外の線は出さない',
+      {content:'0 100 m 500 100 l S 0 400 m 500 400 l S'}, [100,50,300,150], [[100,100,300,100]]);
+    await cropCase('T35 restore の後も範囲は効いたまま',
+      {content:'q 0 0 500 500 re W n Q 0 100 m 500 100 l S'}, [100,50,300,150], [[100,100,300,100]]);
+    await cropCase('T36 塗りの形も範囲で切ってから重なりを除く',
+      {content:'100 100 m 300 100 l S 250 100 100 50 re f'}, [0,0,300,500],
+      [[100,100,300,100],[300,150,250,150],[250,150,250,100]], {fill:true});   // 範囲で切っても切り口に辺は生まれない
+    {
+      // 文字：範囲に掛かるものだけ残す
+      const { page } = await makePage({texts:[{s:'IN', x:120, y:100}, {s:'OUT', x:400, y:300}]});
+      const v = await extractVectors(page, 0, Object.assign({}, OPT, {text:true, crop:[100,50,300,150]}));
+      const got=v.texts.map(t=>t.s).sort().join(',');
+      R.push({ 名前:'T37 文字は範囲に掛かるものだけ残す', 判定: (got==='IN' && v.tst.out===1) ? '✅' : '❌', 期待:'IN（除外1）', 結果:got+'（除外'+v.tst.out+'）' });
+    }
+    {
+      // 回転した細長い文字：外接四角形は範囲に掛かるが、文字の四角形そのものは掛からない → 残さない
+      const q=[[0,10],[10,0],[11,1],[1,11]];                  // 45°に傾いた細い四角（原点のそばを斜めに通る）
+      const out=cvQuadHitsRect(q, [0,0,3,3]);                 // 外接四角形 [0,0,11,11] は範囲 [0,0,3,3] に掛かる
+      const inn=cvQuadHitsRect(q, [4,4,8,8]);                 // こちらは文字の四角形に掛かる
+      R.push({ 名前:'T38 回転した文字は文字の四角形そのもので範囲と比べる', 判定: (!out && inn) ? '✅' : '❌', 期待:'外れ・掛かる', 結果:(out?'掛かる':'外れ')+'・'+(inn?'掛かる':'外れ') });
+    }
     return R;
   };
 })();

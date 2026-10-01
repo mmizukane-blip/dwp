@@ -9,3 +9,5 @@ tools/scan_survey.txt
 tools/dxf_samples/
 
 tools/dxf_variants/
+
+tools/dxf_split/

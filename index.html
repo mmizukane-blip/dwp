@@ -569,6 +569,16 @@ body.nolines .lnsvg{display:none;}
         </div>
       </div>
       <div class="cvrow">
+        <div class="cvlbl">範囲</div>
+        <div class="cvbody">
+          <div class="cvseg" id="cvCropMode">
+            <button data-crop="all" class="active">ページ全体</button>
+            <button data-crop="pick">範囲を選ぶ</button>
+          </div>
+          <div class="cvnote" id="cvCropNote">ページ全体をDXFにします。</div>
+        </div>
+      </div>
+      <div class="cvrow">
         <div class="cvlbl">出すもの</div>
         <div class="cvbody">
           <label class="cvchk"><input type="checkbox" id="cvDxfText" checked>文字を TEXT として出す</label>
@@ -610,9 +620,11 @@ body.nolines .lnsvg{display:none;}
 <!-- DXFの「2点で測って合わせる」ときの校正画面 -->
 <div id="cvcal">
   <div id="cvcalbar">
-    <b>2点で測って合わせる</b>
+    <b id="cvcaltitle">2点で測って合わせる</b>
     <span id="cvcalmsg">図面上で、実寸の分かっている2点をクリックしてください（例：通り芯の間）</span>
     <span style="flex:1"></span>
+    <button id="cvcalOk" class="primary" style="display:none;" disabled>この範囲で決定</button>
+    <button id="cvcalAll" style="display:none;">このページは全体</button>
     <button id="cvcalUndo">やり直す</button>
     <button id="cvcalCancel">中止</button>
   </div>
@@ -1408,6 +1420,7 @@ async function printPdf(){
 const CV_DXF_READY = true;
 let cvFmt='jpeg';          // 'jpeg' | 'png' | 'dxf'
 let cvScaleMode='denom';   // 'denom'（縮尺を入力）| 'calib'（2点校正）| 'paper'（用紙原寸）
+let cvCropMode='all';      // 'all'（ページ全体）| 'pick'（範囲を選ぶ）
 let cvEnc='sjis';          // 'sjis'（既定・国内CAD向け）| 'utf8' | 'esc'
 let cvBusy=false;
 let cvAbort=false;         // 変換中に「中止」が押されたか
@@ -1778,6 +1791,22 @@ function cvClipSeg(s, chain, W, H, out){
   return true;
 }
 
+// 文字の四角形 q（4つの角を周の順に）が、長方形 R=[x0,y0,x1,y1] に少しでも掛かるか。
+// 外接する四角形ではなく文字の四角形そのもので見る（回転した文字が、外接四角形だけ掛かって残るのを防ぐ）
+function cvQuadHitsRect(q, R){
+  const rc=[[R[0],R[1]],[R[2],R[1]],[R[2],R[3]],[R[0],R[3]]];
+  const axes=[[1,0],[0,1]];
+  for(let i=0;i<2;i++){ const ex=q[i+1][0]-q[i][0], ey=q[i+1][1]-q[i][1]; if(ex||ey) axes.push([-ey,ex]); }
+  for(const [ax,ay] of axes){
+    let a0=Infinity, a1=-Infinity, b0=Infinity, b1=-Infinity;
+    for(const c of q){ const d=c[0]*ax+c[1]*ay; if(d<a0) a0=d; if(d>a1) a1=d; }
+    for(const c of rc){ const d=c[0]*ax+c[1]*ay; if(d<b0) b0=d; if(d>b1) b1=d; }
+    const e=CV_EPS*Math.hypot(ax,ay);
+    if(a1<b0-e || b1<a0-e) return false;                     // この向きで離れている＝重ならない
+  }
+  return true;
+}
+
 // ==== DXF：塗りの輪郭と、既にある線との重なりを除く ===========================
 // 同じ形を「線」と「塗り」の両方で描いたPDFでは、塗りの輪郭は既にある線と重なる。
 // 重なる区間だけを除いて残りを出す（部分的な重なりも扱う）。丸めた値の一致ではなく、実際の距離で判定する
@@ -1857,7 +1886,8 @@ async function extractVectors(page, rotation, opt){
   const ap  = (m,x,y)=>[m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];
 
   // 状態：変換行列(ctm)と切り抜き(clip)は save/restore で一緒に出し入れする
-  let ctm=[1,0,0,1,0,0], clip=null; const stack=[];
+  // 範囲を選んだときは、それを切り抜きのいちばん外側に置く（restore や図形の入れ子で消えることがない）
+  let ctm=[1,0,0,1,0,0], clip=(opt.crop ? {parent:null, kind:'rect', rect:opt.crop} : null); const stack=[];
   const segs=[]; const MAX=400000;
   let inText=0;             // テキストの中（Type3フォントの字形を線として拾わないための目印）
   // 組み立て中のパス。輪郭(sub)ごとに {cmd, closed}。cmd は点 [x,y] か曲線 [x1,y1,x2,y2,x3,y3]（ページ座標）。
@@ -2033,15 +2063,13 @@ async function extractVectors(page, rotation, opt){
         const hx = Math.hypot(tr[0], tr[1]);        // 横方向の伸び
         const hy = Math.hypot(tr[2], tr[3]);        // 文字の高さ
         if(!(hy>0)) continue;
-        // 用紙の外の文字は出さない。挿入点1つではなく文字の四隅を囲む四角形で見て、一部でも用紙に掛かれば残す
-        // （回転した文字では囲む四角形のほうが広いので、迷うものは残す側に倒れる。欠落のほうが危険なため）。
-        // なお PDF.js 3.11 の getTextContent 自体も用紙外の文字を1文字単位で落とす（実測）ので、これは二重の保険。
-        // getTextContent からは切り抜きの状態が分からないため、切り抜きの外の文字までは除けない。
+        // 用紙（と、選んだ範囲）の外の文字は出さない。挿入点1つではなく文字の四角形そのもので見て、一部でも掛かれば残す（欠落のほうが危険なため）。
+        // なお PDF.js 3.11 の getTextContent 自体も用紙外の文字を1文字単位で落とす（実測）ので、用紙の判定は二重の保険。
+        // getTextContent からは切り抜きの状態が分からないため、PDFの切り抜きの外の文字までは除けない。
         const w=it.width||0, h=it.height||hy;
         const ux=hx>0?tr[0]/hx:1, uy=hx>0?tr[1]/hx:0, vx=tr[2]/hy, vy=tr[3]/hy;
-        const cs=[[0,0],[w,0],[0,h],[w,h]].map(([p,q])=>toPage(tr[4]+ux*p+vx*q, tr[5]+uy*p+vy*q));
-        const xs=cs.map(c=>c[0]), ys=cs.map(c=>c[1]);
-        if(Math.max(...xs)<-CV_EPS || Math.min(...xs)>W+CV_EPS || Math.max(...ys)<-CV_EPS || Math.min(...ys)>H+CV_EPS){ tst.out++; continue; }
+        const cs=[[0,0],[w,0],[w,h],[0,h]].map(([p,q])=>toPage(tr[4]+ux*p+vx*q, tr[5]+uy*p+vy*q));   // 文字の四角形（周の順）
+        if(!cvQuadHitsRect(cs, [0,0,W,H]) || (opt.crop && !cvQuadHitsRect(cs, opt.crop))){ tst.out++; continue; }
         const ins = toPage(tr[4], tr[5]);           // 挿入点＝ベースラインの左端
         let ang = Math.atan2(tr[1], tr[0]) * 180/Math.PI - r;
         ang = ((ang%360)+360)%360;
@@ -2229,11 +2257,24 @@ async function exportDxf(t){
     mmPerPt = r;                                                // 校正は紙の上のptで測っている（pagePtSize が UserUnit 込み）
   }
 
+  // 範囲を選ぶ：保存を始める前に、全ページの範囲を選び終える（途中で中止しても中途半端なファイルが残らない）
+  const crops = pdfPages.map(()=>null);
+  if(cvCropMode==='pick'){
+    $('cvbg').classList.remove('on');
+    for(let i=0;i<pdfPages.length;i++){
+      const pg = await (await pdfjsOf(docs.get(pdfPages[i].docId))).getPage(pdfPages[i].pageIndex+1);
+      const r = await cvSelectCrop(pdfPages[i], i+1, pdfPages.length, mmPerPt*(pg.userUnit||1));
+      if(!r){ $('cvbg').classList.add('on'); $('cvstat').textContent='中止しました（ファイルは作っていません）'; return; }
+      crops[i] = r.crop || null;
+    }
+    $('cvbg').classList.add('on');
+  }
+
   const many = pdfPages.length>1;
   let done=0, nSeg=0, nText=0, sumAlt=0, nPoly=0, nPolySegs=0;
   const sumMiss=new Map();                                      // Shift-JISで出せなかった文字と、その個数
   const sum={curve:0, curveCapped:0, fillPath:0, fillAdded:0, fillDup:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
-             vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0};
+             vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0, cropped:0, cropEmpty:0};
 
   for(let i=0;i<pdfPages.length;i++){
     if(cvAbort) break;
@@ -2245,8 +2286,9 @@ async function exportDxf(t){
     const uu = page.userUnit || 1;
     if(uu!==1) sum.uuPages++;
     const mmPerUnit = mmPerPt * uu;                             // このページの座標1単位あたりのmm
-    const v = await extractVectors(page, p.rotation, Object.assign({}, opt, {tolPt: opt.tol/mmPerUnit}));   // 許容誤差(mm)を座標の単位に直す
+    const v = await extractVectors(page, p.rotation, Object.assign({}, opt, {tolPt: opt.tol/mmPerUnit, crop: crops[i]}));   // 許容誤差(mm)を座標の単位に直す
     if(v.st.aborted || cvAbort) break;                          // 中止されたページは途中までなので保存しない
+    if(crops[i]){ sum.cropped++; if(!v.segs.length && !v.texts.length){ sum.cropEmpty++; continue; } }   // 囲んだ範囲に何も無ければ保存しない
     nSeg += v.segs.length; nText += v.texts.length;
     for(const k of ['curve','curveCapped','fillPath','fillAdded','fillDup','clip','clipped','image','textPath','shading']) sum[k]+=v.st[k];
     if(v.st.cut) sum.cut=true;
@@ -2289,7 +2331,7 @@ async function exportDxf(t){
     else if(sum.curveCapped) w.push('⚠ 曲線 '+sum.curve+'本を直線に分けましたが、うち '+sum.curveCapped+'本は分ける本数の上限に達し、誤差が'+opt.tol+'mmを超えている可能性があります（許容誤差を大きくすると解消します）');
     else                    w.push('・曲線 '+sum.curve+'本を直線に分けました（誤差'+opt.tol+'mm以内）');
   }
-  if(sum.clipped)  w.push('・切り抜き（PDFで隠れている範囲）や用紙の外にはみ出した線 '+sum.clipped.toLocaleString()+'本を、見えている部分だけに切り詰めました');
+  if(sum.clipped)  w.push('・'+(sum.cropped?'選んだ範囲・':'')+'切り抜き（PDFで隠れている範囲）・用紙の外にはみ出した線 '+sum.clipped.toLocaleString()+'本を、内側の部分だけに切り詰めました');
   if(sum.textOut)  w.push('・用紙の外にある文字 '+sum.textOut+'個は出していません');
   if(sumAlt)       w.push('・Shift-JISに無い記号 '+sumAlt+'個を、形の同じ文字に置き換えました（例：〜→～）');
   if(sumMiss.size){
@@ -2304,6 +2346,8 @@ async function exportDxf(t){
   if(sum.skew)     w.push('・斜体・変形した文字 '+sum.skew+'個は形が変わります');
   if(skipped)      w.push('・画像ページ '+skipped+'枚はDXFにできないので飛ばしました');
   if(sum.cut)      w.push('⚠ 線が多すぎるため途中で打ち切りました。図面が欠けています');
+  if(sum.cropped)  w.push('・範囲を選んだページ '+sum.cropped+'枚は、囲んだ範囲の中だけを出しました（位置は元の図面のまま）');
+  if(sum.cropEmpty) w.push('⚠ 囲んだ範囲に線も文字も無かったページ '+sum.cropEmpty+'枚は保存していません');
   if(w.length) rep += '\n' + w.join('\n');
   rep += '\n\n※ 元のCADデータの復元ではありません。線幅・線種・色・レイヤーは失われています。'
        + '\n※ 白く塗って上から隠した線・透明にした線・切り抜きの外の文字は、DXFに出てしまうことがあります。'
@@ -2353,7 +2397,80 @@ function cvCalibrate(p){
     };
     $('cvcalUndo').onclick=()=>{ pts=[]; redraw(); $('cvcalmsg').textContent='実寸の分かる2点をクリックしてください'; };
     $('cvcalCancel').onclick=()=>finish(null);
+    $('cvcaltitle').textContent='2点で測って合わせる';
     $('cvcalmsg').textContent='図面上で、実寸の分かる2点をクリックしてください（例：通り芯の間）';
+    $('cvcal').classList.add('on');
+  });
+}
+
+// --- 範囲を選ぶ：図面を画面に収まる大きさで出し、ドラッグで四角を囲ませる ---
+// 戻り値：{crop:[x0,y0,x1,y1]}（extractVectors と同じページ座標）／{all:true}（このページは全体）／null（中止）
+// 画素からページ座標へは、画像の大きさの比ではなく描画に使った倍率で戻す（画像の幅・高さは端数を切り上げているため）
+function cvSelectCrop(p, k, n, mmPerUnit){
+  return new Promise(async (resolve)=>{
+    const page = await (await pdfjsOf(docs.get(p.docId))).getPage(p.pageIndex+1);
+    const vp1 = page.getViewport({scale:1, rotation:p.rotation});
+    const W = vp1.width, H = vp1.height;                      // 回転後の用紙（PDFのユーザー単位）
+    const longEdge = cvFitLongEdge(2400, Math.min(W,H)/Math.max(W,H));
+    const scale = longEdge/Math.max(W,H);                     // renderPageCanvas と同じ倍率（画素 ÷ scale = ページ座標）
+    const src = await renderPageCanvas(p, longEdge);
+    const cv = $('cvcalcv'); cv.width=src.width; cv.height=src.height;
+    const barH = $('cvcalbar').getBoundingClientRect().height || 44;
+    cv.style.maxWidth='100%'; cv.style.maxHeight=Math.max(200, window.innerHeight-barH-30)+'px'; cv.style.cursor='crosshair';
+    cv.style.touchAction='none';
+    const ctx = cv.getContext('2d');
+    let a=null, b=null, drag=false;
+    const box=()=> (a && b) ? [Math.min(a[0],b[0]), Math.min(a[1],b[1]), Math.max(a[0],b[0]), Math.max(a[1],b[1])] : null;
+    const okSize=()=>{                                         // 小さすぎる四角（クリックだけ等）は決定させない
+      const q=box(); if(!q) return false;
+      const r=cv.getBoundingClientRect();
+      return (q[2]-q[0])*r.width/cv.width >= 8 && (q[3]-q[1])*r.height/cv.height >= 8;
+    };
+    const toPageBox=(q)=>[q[0]/scale, H-q[3]/scale, q[2]/scale, H-q[1]/scale];   // 画素（Y下向き）→ ページ座標（Y上向き）
+    const redraw=()=>{
+      ctx.drawImage(src,0,0);
+      const q=box(); if(!q) return;
+      ctx.fillStyle='rgba(0,0,0,0.35)';                       // 範囲の外を暗くして、何が出るかを分かりやすく
+      ctx.fillRect(0,0,cv.width,q[1]); ctx.fillRect(0,q[3],cv.width,cv.height-q[3]);
+      ctx.fillRect(0,q[1],q[0],q[3]-q[1]); ctx.fillRect(q[2],q[1],cv.width-q[2],q[3]-q[1]);
+      ctx.lineWidth=Math.max(2, cv.width/800); ctx.strokeStyle='#e5352b';
+      ctx.strokeRect(q[0],q[1],q[2]-q[0],q[3]-q[1]);
+    };
+    const msg=()=>{
+      const head='ページ '+k+' / '+n+'：';
+      if(!okSize()){ $('cvcalmsg').textContent=head+'出したい範囲をドラッグで囲んでください'; $('cvcalOk').disabled=true; return; }
+      const r=toPageBox(box());
+      $('cvcalmsg').textContent=head+'囲んだ範囲 約'+Math.round((r[2]-r[0])*mmPerUnit).toLocaleString()+' × '
+        +Math.round((r[3]-r[1])*mmPerUnit).toLocaleString()+' mm（囲み直すこともできます）';
+      $('cvcalOk').disabled=false;
+    };
+    const posOf=(e)=>{                                         // 画面の位置 → 画像の画素。画像の外へ出たら端で止める
+      const r=cv.getBoundingClientRect();
+      const x=(e.clientX-r.left)*cv.width/r.width, y=(e.clientY-r.top)*cv.height/r.height;
+      return [Math.max(0,Math.min(cv.width,x)), Math.max(0,Math.min(cv.height,y))];
+    };
+    cv.onpointerdown=(e)=>{ if(e.button!==0) return; e.preventDefault(); drag=true; a=posOf(e); b=a;
+      try{ cv.setPointerCapture(e.pointerId); }catch(_){} redraw(); msg(); };
+    cv.onpointermove=(e)=>{ if(!drag) return; b=posOf(e); redraw(); msg(); };
+    cv.onpointerup=(e)=>{ if(!drag) return; drag=false; b=posOf(e);
+      try{ cv.releasePointerCapture(e.pointerId); }catch(_){} if(!okSize()){ a=null; b=null; } redraw(); msg(); };
+    // 後片付け（決定・全体・中止・Esc のどれでも同じ）。画像を手放し、ボタンを元に戻す
+    const finish=(val)=>{
+      cv.onpointerdown=null; cv.onpointermove=null; cv.onpointerup=null;
+      $('cvcalOk').onclick=null; $('cvcalAll').onclick=null; $('cvcalUndo').onclick=null; $('cvcalCancel').onclick=null;
+      $('cvcalOk').style.display='none'; $('cvcalAll').style.display='none';
+      cv.style.maxWidth=''; cv.style.maxHeight=''; cv.style.cursor=''; cv.style.touchAction='';
+      $('cvcal').classList.remove('on');
+      src.width=0; src.height=0; cv.width=0; cv.height=0;
+      resolve(val);
+    };
+    $('cvcalOk').onclick=()=>{ if(okSize()) finish({crop:toPageBox(box())}); };
+    $('cvcalAll').onclick=()=>finish({all:true});
+    $('cvcalUndo').onclick=()=>{ a=null; b=null; redraw(); msg(); };
+    $('cvcalCancel').onclick=()=>finish(null);                 // Esc もこのボタンを押したことになる
+    $('cvcaltitle').textContent='範囲を選ぶ';
+    $('cvcalOk').style.display=''; $('cvcalAll').style.display='';
+    redraw(); msg();
     $('cvcal').classList.add('on');
   });
 }
@@ -3579,6 +3696,13 @@ $('cvRun').onclick = ()=>{                                   // 変換中は同�
 };
 $('cvbg').addEventListener('click', (e)=>{ if(e.target===$('cvbg')) closeConvert(); });   // 背景クリックで閉じる
 document.querySelectorAll('#cvFmt button').forEach(b=> b.onclick = ()=>cvSetFmt(b.dataset.fmt));
+document.querySelectorAll('#cvCropMode button').forEach(b=> b.onclick = ()=>{
+  cvCropMode = b.dataset.crop;
+  document.querySelectorAll('#cvCropMode button').forEach(x=>x.classList.toggle('active', x===b));
+  $('cvCropNote').textContent = (cvCropMode==='pick')
+    ? '「変換して保存」を押すと、ページごとに図面が開きます。出したい範囲をドラッグで囲んでください。囲んだ範囲の外の線は切り落とします（位置は元の図面のまま）。'
+    : 'ページ全体をDXFにします。';
+});
 document.querySelectorAll('#cvScaleMode button').forEach(b=> b.onclick = ()=>{
   cvScaleMode = b.dataset.sm;
   document.querySelectorAll('#cvScaleMode button').forEach(x=>x.classList.toggle('active', x===b));
