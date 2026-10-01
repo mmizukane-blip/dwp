@@ -249,6 +249,41 @@
       const ok = r.nLine===1 && r.nPoly===0 && key(r.segs)===key([[0,0,10,0]]);
       R.push({ 名前:'T28 丸めると長さゼロになる線は出さない', 判定: ok ? '✅' : '❌', 期待:'LINE1本だけ', 結果:'LINE'+r.nLine+'本・ポリライン'+r.nPoly+'個' });
     }
+    // --- 塗りの輪郭は、ほかの線と重なる区間を除いて足す（tools/prompts/dxf_fill_dedupe.md） ---
+    const FILL=Object.assign({}, OPT, {fill:true});
+    const setOf=(segs)=>segs.map(q=>{ const a=q[0].toFixed(2)+','+q[1].toFixed(2), b=q[2].toFixed(2)+','+q[3].toFixed(2); return a<b?a+'|'+b:b+'|'+a; }).sort().join(' ');
+    const fillCase=async (name, content, expected, check)=>{
+      const { page } = await makePage({content});
+      const v = await extractVectors(page, 0, FILL);
+      const got=setOf(v.segs), exp=setOf(expected);
+      const ok = got===exp && (!check || check(v));
+      R.push({ 名前:name, 判定: ok?'✅':'❌', 期待:exp+(check?'（＋件数の条件）':''), 結果:got+' / 追加'+v.st.fillAdded+'・重複'+v.st.fillDup });
+      return v;
+    };
+    await fillCase('T29 線で描いた四角と同じ塗りは省き、塗りだけの四角は出す（Codexの入力例）',
+      '100 100 50 50 re S 100 100 50 50 re f 300 300 10 10 re f',
+      [[100,100,150,100],[150,100,150,150],[150,150,100,150],[100,150,100,100],
+       [300,300,310,300],[310,300,310,310],[310,310,300,310],[300,310,300,300]],
+      v=>v.st.fillDup===4 && v.st.fillAdded===4);
+    await fillCase('T30 一部だけ重なる辺は、重ならない区間だけ出す',
+      '0 100 m 100 100 l S 50 100 100 20 re f',
+      [[0,100,100,100],[100,100,150,100],[150,100,150,120],[150,120,50,120],[50,120,50,100]]);
+    await fillCase('T31 隣り合う塗りの共有辺は1回だけ',
+      '10 10 10 10 re f 20 10 10 10 re f',
+      [[10,10,20,10],[20,10,20,20],[20,20,10,20],[10,20,10,10],[20,10,30,10],[30,10,30,20],[30,20,20,20]]);
+    await fillCase('T32 丸めの境目をまたぐほぼ同じ位置（0.0002pt差）は重なりとみなす',
+      '100.0049 50 m 100.0049 150 l S 100.0051 50 50 100 re f',
+      [[100.0049,50,100.0049,150],[100.0051,50,150.0051,50],[150.0051,50,150.0051,150],[150.0051,150,100.0051,150]]);
+    {
+      // 線と塗りの境目ではポリラインにつながない（線の終点＝塗りの始点でも別にする）
+      const { page } = await makePage({content:'10 300 m 60 300 l S 60 300 m 110 300 l 110 350 l 60 350 l h f'});
+      const v = await extractVectors(page, 0, FILL);
+      const r = parseDxf(buildDxf(v, 1, 'sjis'));
+      const lone = r.segs.some(q=>q[0]===10 && q[1]===300 && q[2]===60 && q[3]===300) && r.nLine>=1;
+      const ok = v.breakAt===1 && lone && key(r.segs)===key(v.segs);
+      R.push({ 名前:'T33 線と塗りの境目ではポリラインにつながない', 判定: ok?'✅':'❌', 期待:'境目=1・線は単独のLINE・読み戻して一致',
+               結果:'境目='+v.breakAt+'・線'+(lone?'単独':'つながった')+'・LINE'+r.nLine+'本／ポリライン'+r.nPoly+'個' });
+    }
     return R;
   };
 })();

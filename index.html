@@ -573,8 +573,8 @@ body.nolines .lnsvg{display:none;}
         <div class="cvbody">
           <label class="cvchk"><input type="checkbox" id="cvDxfText" checked>文字を TEXT として出す</label>
           <label class="cvchk"><input type="checkbox" id="cvDxfCurve" checked>曲線・円弧を細かい線に分けて出す</label>
-          <label class="cvchk"><input type="checkbox" id="cvDxfFill">塗りつぶしの輪郭も線として出す</label>
-          <div class="cvnote">許容誤差 <input type="number" id="cvTol" value="0.2" min="0.02" max="5" step="0.02"> mm（曲線を線に分けるときの粗さ）</div>
+          <label class="cvchk"><input type="checkbox" id="cvDxfFill" checked>塗りつぶしの形も線として出す（ほかの線と重なる部分は省く）</label>
+          <div class="cvnote">許容誤差 <input type="number" id="cvTol" value="1" min="0.02" max="5" step="0.02"> mm（実寸。曲線を線に分けるときの粗さ。1/100の図面なら1mmで紙の上0.01mm）</div>
         </div>
       </div>
       <div class="cvrow">
@@ -1778,6 +1778,61 @@ function cvClipSeg(s, chain, W, H, out){
   return true;
 }
 
+// ==== DXF：塗りの輪郭と、既にある線との重なりを除く ===========================
+// 同じ形を「線」と「塗り」の両方で描いたPDFでは、塗りの輪郭は既にある線と重なる。
+// 重なる区間だけを除いて残りを出す（部分的な重なりも扱う）。丸めた値の一致ではなく、実際の距離で判定する
+// （丸めると、境目をまたぐ同じ点が別の値になったり、別の線が同じ値になったりするため）。
+// 判定の距離は紙の上でごく小さく取る。重複はもともと同じ座標で描かれた線なので、これで足りる。
+// 実寸で決めると、1/1 の図面では紙の上で離れた別の線まで消してしまうおそれがある。
+const CV_DUP_EPS = 0.01;   // 同じ線とみなす距離（ページの単位＝pt。紙の上で約0.0035mm）
+// 線分の空間索引：升目ごとに、そこを通る線分を登録する（追加もできる）
+function cvSegIndex(list, W, H){
+  const G=128, cw=Math.max((W+2)/G,1e-9), ch=Math.max((H+2)/G,1e-9), step=Math.min(cw,ch)/2;
+  const cells=new Map(), segs=[], mark=[]; let tick=0;
+  // 線分に沿って升目の半分ずつ進み、通った升目とその周り（3×3）を順に返す
+  const walk=(s, fn)=>{
+    const n=Math.max(1, Math.ceil(Math.hypot(s[2]-s[0], s[3]-s[1])/step));
+    for(let t=0;t<=n;t++){
+      const gx=Math.floor((s[0]+(s[2]-s[0])*t/n+1)/cw), gy=Math.floor((s[1]+(s[3]-s[1])*t/n+1)/ch);
+      for(let j=gy-1;j<=gy+1;j++){ if(j<0||j>=G) continue;
+        for(let i=gx-1;i<=gx+1;i++){ if(i<0||i>=G) continue; fn(j*G+i); } }
+    }
+  };
+  const add=(s)=>{
+    const k=segs.length; segs.push(s);
+    walk(s, (c)=>{ let a=cells.get(c); if(!a){ a=[]; cells.set(c,a); } if(a[a.length-1]!==k) a.push(k); });
+  };
+  const cand=(s)=>{
+    tick++; const out=[];
+    walk(s, (c)=>{ const a=cells.get(c); if(a) for(const k of a){ if(mark[k]!==tick){ mark[k]=tick; out.push(k); } } });
+    return out;
+  };
+  for(const s of list) add(s);
+  return {add, cand, get:(k)=>segs[k]};
+}
+// 線分 f から、索引にある線分と重なる区間を除いた残りを返す（重なりが無ければ [f]、全部重なれば []）
+function cvSubtractOverlap(f, ix, eps){
+  const dx=f[2]-f[0], dy=f[3]-f[1], L=Math.hypot(dx,dy);
+  if(!(L>eps)) return [];                                         // 長さがほぼゼロの辺は出さない
+  const ux=dx/L, uy=dy/L, cover=[];
+  for(const k of ix.cand(f)){
+    const s=ix.get(k);
+    // s の両端が f の直線から eps 以内にある＝同じ直線の上にある
+    const d1=Math.abs((s[0]-f[0])*uy-(s[1]-f[1])*ux), d2=Math.abs((s[2]-f[0])*uy-(s[3]-f[1])*ux);
+    if(d1>eps || d2>eps) continue;
+    let a=(s[0]-f[0])*ux+(s[1]-f[1])*uy, b=(s[2]-f[0])*ux+(s[3]-f[1])*uy;
+    if(a>b){ const t=a; a=b; b=t; }
+    a=Math.max(a,0); b=Math.min(b,L);                               // 切る位置は正確に（遊び eps は「同じ直線か」と「残りが短すぎないか」の判定だけに使う）
+    if(b>a) cover.push([a,b]);
+  }
+  if(!cover.length) return [f];
+  cover.sort((p,q)=>p[0]-q[0]);
+  const rest=[]; let pos=0;
+  for(const [a,b] of cover){ if(a>pos+eps) rest.push([pos,a]); if(b>pos) pos=b; }
+  if(L>pos+eps) rest.push([pos,L]);
+  return rest.map(([a,b])=>[f[0]+ux*a, f[1]+uy*a, f[0]+ux*b, f[1]+uy*b]);
+}
+
 // --- PDFのページから、DXFに出す線と文字を取り出す ---
 // 吸着用の extractPageSnap とは別の経路にしている。あちらは画面座標を0〜1に正規化するため
 // 絶対寸法が消えており、DXFには使えない。こちらは PDFユーザー空間(pt) のまま最後まで持つ。
@@ -1788,7 +1843,7 @@ async function extractVectors(page, rotation, opt){
   const vw = view[2]-view[0], vh = view[3]-view[1];
   const r = ((rotation%360)+360)%360;
   const W = (r===90||r===270)?vh:vw, H = (r===90||r===270)?vw:vh;   // 回転後の用紙の幅・高さ
-  const st = {curve:0, curveCapped:0, fillPath:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false, aborted:false};
+  const st = {curve:0, curveCapped:0, fillPath:0, fillAdded:0, fillDup:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false, aborted:false};
 
   // CropBox基準へ寄せ、DWPで回した向きに合わせる（DXFもPDFもY上向きなので反転は不要）
   const toPage = (x,y)=>{
@@ -1844,22 +1899,25 @@ async function extractVectors(page, rotation, opt){
     if(cvAbort) st.aborted=true;
   };
   // 線分を1本出す（用紙と切り抜きで切ってから）。1本が切り抜きで何区間にも分かれても上限を超えないようにする
-  const emit=(s)=>{
+  const fsegs=[];            // 塗りの輪郭。線として描かれたものと重ならない部分だけを、最後に足す
+  const emit=(s, out)=>{
+    out = out || segs;
     if(st.cut) return;
-    if(cvClipSeg(s, clip, W, H, segs)) st.clipped++;
-    if(segs.length>MAX){ segs.length=MAX; st.cut=true; }
+    if(cvClipSeg(s, clip, W, H, out)) st.clipped++;
+    const over=segs.length+fsegs.length-MAX;
+    if(over>0){ out.length=Math.max(0, out.length-over); st.cut=true; }
   };
   // 組み立てたパスを線分にして出す。closeAll=true は塗りの輪郭（開いた輪郭も暗黙に閉じる）
-  const outPath=async (closeAll)=>{
+  const outPath=async (closeAll, out)=>{
     for(const sub of subs){
       const pts=flatten(sub, tolPt, true);
       for(let i=0;i<pts.length-1;i++){
-        emit([pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1]]);
+        emit([pts[i][0],pts[i][1],pts[i+1][0],pts[i+1][1]], out);
         if((i & 255)===255){ await breathe(); if(st.aborted || st.cut) return; }
       }
       if((sub.closed||closeAll) && pts.length>2){
         const a=pts[pts.length-1], b=pts[0];
-        if(a[0]!==b[0] || a[1]!==b[1]) emit([a[0],a[1],b[0],b[1]]);
+        if(a[0]!==b[0] || a[1]!==b[1]) emit([a[0],a[1],b[0],b[1]], out);
       }
       await breathe(); if(st.aborted || st.cut) return;
     }
@@ -1936,7 +1994,7 @@ async function extractVectors(page, rotation, opt){
     }
     if(fn===OPS.fill || fn===OPS.eoFill){
       if(inText>0) st.textPath++;                                   // 文字の字形（Type3など）は線にしない
-      else { st.fillPath++; if(opt.fill) await outPath(true); }
+      else { st.fillPath++; if(opt.fill) await outPath(true, fsegs); }   // 塗りの輪郭は別に集めて、最後に重なりを除く
       finishPath(); continue;
     }
     if(fn===OPS.fillStroke || fn===OPS.eoFillStroke || fn===OPS.closeFillStroke || fn===OPS.closeEOFillStroke){
@@ -1947,6 +2005,20 @@ async function extractVectors(page, rotation, opt){
     if(fn===OPS.clip){ pendingClip='nonzero'; st.clip++; continue; }  // ここでは保留だけ。確定は次の描画命令の後
     if(fn===OPS.eoClip){ pendingClip='evenodd'; st.clip++; continue; }
     if(fn===OPS.endPath){ finishPath(); continue; }                     // 描かれずに終わったパス（切り抜き用など）
+  }
+
+  // --- 塗りの輪郭：ページ全体の線（と、先に足した塗りの輪郭）と重なる区間を除いて足す ---
+  // 線どうし・塗りどうしで共有する辺は1回だけ出る。線と塗りの境目ではポリラインのつなぎを切る（breakAt）
+  let breakAt=-1;
+  if(fsegs.length && !st.aborted){
+    breakAt=segs.length;
+    const ix=cvSegIndex(segs, W, H);
+    for(let i=0;i<fsegs.length;i++){
+      if((i & 1023)===0){ await breathe(); if(st.aborted) break; }
+      const rest=cvSubtractOverlap(fsegs[i], ix, CV_DUP_EPS);
+      if(!rest.length){ st.fillDup++; continue; }
+      for(const r of rest){ if(segs.length>=MAX){ st.cut=true; break; } segs.push(r); ix.add(r); st.fillAdded++; }
+    }
   }
 
   // --- 文字 ---
@@ -1983,7 +2055,7 @@ async function extractVectors(page, rotation, opt){
       }
     }catch(e){ console.error(e); }
   }
-  return {segs, texts, st, tst, pageW:W, pageH:H};
+  return {segs, texts, st, tst, pageW:W, pageH:H, breakAt};
 }
 
 // ==== DXF：Shift-JIS(CP932) への変換 =========================================
@@ -2093,7 +2165,9 @@ function buildDxf(v, mmPerPt, encMode){
   // ・線のZ座標（30/31）は書かない。平面図なので常に0（Jw_cad・NETEAGLE で確認済み）
   const lst={line:0, poly:0, polySegs:0};
   const chains=[]; let chain=null;
-  for(const s of v.segs){
+  for(let si=0; si<v.segs.length; si++){
+    const s=v.segs[si];
+    if(si===v.breakAt && chain){ chains.push(chain); chain=null; }    // 線と塗りの境目ではつながない
     const a=[n(X(s[0])), n(Y(s[1]))], b=[n(X(s[2])), n(Y(s[3]))];
     if(a[0]===b[0] && a[1]===b[1]) continue;                   // 丸めた後に長さゼロになる線も捨てる
     const last = chain ? chain[chain.length-1] : null;
@@ -2136,7 +2210,7 @@ async function exportDxf(t){
     text:  $('cvDxfText').checked,
     curve: $('cvDxfCurve').checked,
     fill:  $('cvDxfFill').checked,
-    tol:   Math.max(0.02, parseFloat($('cvTol').value)||0.2),
+    tol:   Math.max(0.02, parseFloat($('cvTol').value)||1),
   };
   // 紙の上の1pt（1/72インチ）あたり何mmか。紙の上では 25.4/72 mm。
   // PDFの座標1単位は「1pt × UserUnit」なので、ページごとに mmPerPt × UserUnit で換算する。
@@ -2158,7 +2232,7 @@ async function exportDxf(t){
   const many = pdfPages.length>1;
   let done=0, nSeg=0, nText=0, sumAlt=0, nPoly=0, nPolySegs=0;
   const sumMiss=new Map();                                      // Shift-JISで出せなかった文字と、その個数
-  const sum={curve:0, curveCapped:0, fillPath:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
+  const sum={curve:0, curveCapped:0, fillPath:0, fillAdded:0, fillDup:0, clip:0, clipped:0, image:0, textPath:0, shading:0, cut:false,
              vertical:0, skew:0, wide:0, textOut:0, empty:0, textOnly:0, uuPages:0};
 
   for(let i=0;i<pdfPages.length;i++){
@@ -2174,7 +2248,7 @@ async function exportDxf(t){
     const v = await extractVectors(page, p.rotation, Object.assign({}, opt, {tolPt: opt.tol/mmPerUnit}));   // 許容誤差(mm)を座標の単位に直す
     if(v.st.aborted || cvAbort) break;                          // 中止されたページは途中までなので保存しない
     nSeg += v.segs.length; nText += v.texts.length;
-    for(const k of ['curve','curveCapped','fillPath','clip','clipped','image','textPath','shading']) sum[k]+=v.st[k];
+    for(const k of ['curve','curveCapped','fillPath','fillAdded','fillDup','clip','clipped','image','textPath','shading']) sum[k]+=v.st[k];
     if(v.st.cut) sum.cut=true;
     sum.vertical+=v.tst.vertical; sum.skew+=v.tst.skew; sum.wide+=v.tst.wide; sum.textOut+=v.tst.out;
     if(!v.segs.length && !v.texts.length) sum.empty++;
@@ -2208,7 +2282,8 @@ async function exportDxf(t){
   if(sum.textOnly) w.push('⚠ '+sum.textOnly+'ページは線が取れず、文字だけになりました。スキャン図面に文字読み取り（OCR）の結果が埋まっているPDFです。図形は入っていません');
   if(sum.wide)     w.push('・横に極端に伸びた文字 '+sum.wide+'個は、幅を等倍に戻しました（OCR文字によくある形です）');
   if(sum.image)    w.push('・画像 '+sum.image+'個は出していません（DXFは画像を線にできません）');
-  if(sum.fillPath && !opt.fill) w.push('・塗りつぶし '+sum.fillPath+'個は出していません（「塗りつぶしの輪郭も出す」で含められます）');
+  if(sum.fillPath && !opt.fill) w.push('⚠ 塗りつぶし '+sum.fillPath+'個は出していません。塗りだけで描いた柱や壁が抜けている場合は「塗りつぶしの形も線として出す」をONにしてください');
+  if(sum.fillPath && opt.fill)  w.push('・塗りつぶし '+sum.fillPath+'個の形のうち、ほかの線と重ならない線を '+sum.fillAdded.toLocaleString()+'本加えました（重なる部分は省いています）');
   if(sum.curve){
     if(!opt.curve)          w.push('・曲線 '+sum.curve+'本は、両端を結ぶ直線で代用しました');
     else if(sum.curveCapped) w.push('⚠ 曲線 '+sum.curve+'本を直線に分けましたが、うち '+sum.curveCapped+'本は分ける本数の上限に達し、誤差が'+opt.tol+'mmを超えている可能性があります（許容誤差を大きくすると解消します）');
